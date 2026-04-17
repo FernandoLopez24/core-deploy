@@ -11,10 +11,12 @@ import json
 import os
 import sys
 import time
+import threading
 import subprocess
 import psycopg2
 import psycopg2.extras
 from collections import deque
+from datetime import datetime
 
 APP_NAME    = "core-deploy"
 APP_VERSION = "1.0.0"
@@ -589,6 +591,210 @@ def fetch_maquinas(search=""):
             return [dict(r) for r in cur.fetchall()]
     finally:
         conn.close()
+
+
+# ── Deploys programados — BD ──────────────────────────────────────────────
+
+def ensure_deploys_table():
+    """Crea la tabla deploys_programados si no existe."""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS deploys_programados (
+                    id          SERIAL PRIMARY KEY,
+                    usuario     TEXT        NOT NULL,
+                    nro_cliente INTEGER     NOT NULL,
+                    desc_cliente TEXT       NOT NULL,
+                    servicios   TEXT        NOT NULL,
+                    fecha_hora  TIMESTAMP   NOT NULL,
+                    estado      TEXT        NOT NULL DEFAULT 'pendiente',
+                    detalle     TEXT        NOT NULL DEFAULT '',
+                    creado_at   TIMESTAMP   NOT NULL DEFAULT NOW()
+                )
+            """)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def db_insert_deploy_programado(usuario, nro_cliente, desc_cliente, servicios, fecha_hora):
+    """Inserta un deploy programado. servicios es lista de .cbl."""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO deploys_programados
+                    (usuario, nro_cliente, desc_cliente, servicios, fecha_hora)
+                VALUES (%s, %s, %s, %s, %s)
+                RETURNING id
+            """, (usuario, nro_cliente, desc_cliente,
+                  json.dumps(servicios), fecha_hora))
+            new_id = cur.fetchone()[0]
+        conn.commit()
+        return new_id
+    finally:
+        conn.close()
+
+
+def db_fetch_deploys_usuario(usuario):
+    """Devuelve los deploys del usuario ordenados por fecha."""
+    conn = get_connection()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("""
+                SELECT id, usuario, nro_cliente, desc_cliente,
+                       servicios, fecha_hora, estado, detalle, creado_at
+                FROM deploys_programados
+                WHERE usuario = %s
+                ORDER BY fecha_hora
+            """, (usuario,))
+            rows = []
+            for r in cur.fetchall():
+                d = dict(r)
+                d["servicios"] = json.loads(d["servicios"])
+                rows.append(d)
+            return rows
+    finally:
+        conn.close()
+
+
+def db_fetch_deploys_pendientes():
+    """Devuelve todos los deploys pendientes cuya hora ya llegó."""
+    conn = get_connection()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("""
+                SELECT d.*, c.ip_servidor::text AS ip, c.path, c.path_hades,
+                       COALESCE(m.ssh_user, 'tuxedo') AS ssh_user,
+                       COALESCE(m.ssh_password, '')   AS ssh_password,
+                       COALESCE(m.ssh_port, 22)       AS ssh_port
+                FROM deploys_programados d
+                JOIN clientes c ON c.nro_cliente = d.nro_cliente
+                LEFT JOIN maquinas m ON LOWER(m.nombre) = LOWER(c.servidor)
+                WHERE d.estado = 'pendiente'
+                  AND d.fecha_hora <= NOW()
+                ORDER BY d.fecha_hora
+            """)
+            rows = []
+            for r in cur.fetchall():
+                d = dict(r)
+                d["servicios"] = json.loads(d["servicios"])
+                rows.append(d)
+            return rows
+    finally:
+        conn.close()
+
+
+def db_proximo_deploy_pendiente():
+    """Devuelve cuántos segundos faltan para el próximo deploy pendiente, o None."""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT EXTRACT(EPOCH FROM (fecha_hora - NOW()))
+                FROM deploys_programados
+                WHERE estado = 'pendiente' AND fecha_hora > NOW()
+                ORDER BY fecha_hora
+                LIMIT 1
+            """)
+            row = cur.fetchone()
+            return float(row[0]) if row else None
+    finally:
+        conn.close()
+
+
+def db_update_deploy_estado(deploy_id, estado, detalle=""):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE deploys_programados SET estado=%s, detalle=%s
+                WHERE id=%s
+            """, (estado, detalle, deploy_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def db_delete_deploy(deploy_id):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM deploys_programados WHERE id=%s", (deploy_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# ── Scheduler en segundo plano ────────────────────────────────────────────
+
+_scheduler_event   = threading.Event()
+_scheduler_running = False
+
+
+def _run_scheduled_deploy(deploy):
+    """Ejecuta un deploy programado en segundo plano (sin UI curses)."""
+    servicios = deploy["servicios"]
+    row = {
+        "ip":           deploy["ip"],
+        "ssh_user":     deploy["ssh_user"],
+        "ssh_password": deploy["ssh_password"],
+        "ssh_port":     deploy["ssh_port"],
+        "path":         deploy["path"],
+        "path_hades":   deploy["path_hades"],
+        "desc_cliente": deploy["desc_cliente"],
+    }
+
+    resultados = []
+    # Leer build.server una sola vez
+    r_bs = subprocess.run(
+        ssh_cmd_base(row["ip"], row["ssh_user"], row["ssh_port"]) +
+        [f'cat "{row["path"]}/build.server" 2>/dev/null'],
+        capture_output=True, text=True, timeout=15,
+        env=_sshenv(row["ssh_password"]),
+    )
+    build_content = r_bs.stdout
+
+    for cbl in servicios:
+        ok, detalle = _deploy_one_silent(row, cbl, build_content, lambda m: None)
+        resultados.append(f"{'✓' if ok else '✗'} {cbl}: {detalle}")
+
+    errores = sum(1 for r in resultados if r.startswith("✗"))
+    estado  = "error" if errores else "ok"
+    db_update_deploy_estado(deploy["id"], estado, "\n".join(resultados))
+
+
+def _scheduler_loop():
+    """Hilo del scheduler. Duerme exactamente hasta el próximo deploy."""
+    global _scheduler_running
+    while _scheduler_running:
+        try:
+            pendientes = db_fetch_deploys_pendientes()
+            for dep in pendientes:
+                db_update_deploy_estado(dep["id"], "ejecutando")
+                threading.Thread(
+                    target=_run_scheduled_deploy,
+                    args=(dep,),
+                    daemon=True,
+                ).start()
+
+            # Calcular tiempo hasta el próximo deploy
+            secs = db_proximo_deploy_pendiente()
+            # Máximo 5 min de espera para no consumir recursos innecesariamente
+            wait = min(secs, 300) if secs is not None else 300
+        except Exception:
+            wait = 300
+
+        # Event.wait libera el GIL y no consume CPU mientras duerme.
+        # Se puede despertar antes si llega un nuevo deploy (notify_scheduler).
+        _scheduler_event.wait(timeout=wait)
+        _scheduler_event.clear()
+
+
+def notify_scheduler():
+    """Despierta el scheduler inmediatamente (llamar al programar un nuevo deploy)."""
+    _scheduler_event.set()
 
 
 # ── SSH helpers ────────────────────────────────────────────────────────────
@@ -1559,6 +1765,102 @@ def ask_input(stdscr, prompt):
     return value
 
 
+# ── Widgets de deploy programado ─────────────────────────────────────────
+
+def ask_datetime(stdscr, prompt="Fecha y hora (DD/MM/AAAA HH:MM): "):
+    """Pide una fecha/hora con validación. Devuelve datetime o None."""
+    while True:
+        raw = ask_input(stdscr, prompt)
+        if not raw:
+            return None
+        try:
+            return datetime.strptime(raw.strip(), "%d/%m/%Y %H:%M")
+        except ValueError:
+            _show_message(stdscr, "Formato inválido. Usá DD/MM/AAAA HH:MM", error=True)
+
+
+def deploy_when_picker(stdscr, titulo=""):
+    """Pregunta si ejecutar ahora o programar. Devuelve 'now', 'schedule' o None."""
+    options = [
+        ("now",      "Ejecutar ahora"),
+        ("schedule", "Programar para después"),
+    ]
+    current = 0
+    while True:
+        stdscr.erase()
+        h, w = stdscr.getmaxyx()
+
+        stdscr.attron(curses.color_pair(C_HEADER) | curses.A_BOLD)
+        stdscr.addstr(0, 0, f" {titulo} ".ljust(w - 1))
+        stdscr.attroff(curses.color_pair(C_HEADER) | curses.A_BOLD)
+
+        stdscr.addstr(2, 4, "¿Cuándo ejecutar?", curses.A_BOLD)
+        for i, (_, label) in enumerate(options):
+            y    = 4 + i * 2
+            attr = curses.color_pair(C_SELECTED) | curses.A_BOLD if i == current \
+                   else curses.color_pair(C_NORMAL)
+            mark = " ► " if i == current else "   "
+            stdscr.addstr(y, 6, mark + label, attr)
+
+        stdscr.attron(curses.color_pair(C_STATUS))
+        stdscr.addstr(h - 1, 0, " ↑↓=Seleccionar  Enter=Confirmar  ESC=Cancelar ".ljust(w - 1))
+        stdscr.attroff(curses.color_pair(C_STATUS))
+        stdscr.refresh()
+
+        key = stdscr.getch()
+        if key == 27:
+            return None
+        elif key == curses.KEY_UP:
+            current = (current - 1) % len(options)
+        elif key == curses.KEY_DOWN:
+            current = (current + 1) % len(options)
+        elif key in (curses.KEY_ENTER, 10, 13):
+            return options[current][0]
+
+
+def draw_programados(stdscr, rows, selected, offset):
+    """Dibuja la lista de deploys programados del usuario."""
+    h, w   = stdscr.getmaxyx()
+    list_h = h - 5
+
+    header = f"  {'CLIENTE':<22}  {'SERVICIOS':<25}  {'FECHA/HORA':<17}  {'ESTADO'}"
+    stdscr.attron(curses.color_pair(C_TITLE) | curses.A_BOLD)
+    stdscr.addstr(3, 0, header[:w - 1].ljust(w - 1))
+    stdscr.attroff(curses.color_pair(C_TITLE) | curses.A_BOLD)
+
+    ESTADO_COLOR = {
+        "pendiente":  C_WARN,
+        "ejecutando": C_SEARCH,
+        "ok":         C_OK,
+        "error":      C_ERROR,
+    }
+
+    visible = rows[offset: offset + list_h]
+    for i, dep in enumerate(visible):
+        y     = 4 + i
+        abs_i = offset + i
+        svcs  = ", ".join(dep["servicios"])
+        fh    = dep["fecha_hora"].strftime("%d/%m/%Y %H:%M") \
+                if hasattr(dep["fecha_hora"], "strftime") else str(dep["fecha_hora"])[:16]
+        est   = dep["estado"]
+        color = ESTADO_COLOR.get(est, C_NORMAL)
+        line  = f"  {dep['desc_cliente']:<22}  {svcs:<25}  {fh:<17}  {est.upper()}"
+        if abs_i == selected:
+            stdscr.attron(curses.color_pair(C_SELECTED) | curses.A_BOLD)
+            stdscr.addstr(y, 0, line[:w - 1].ljust(w - 1))
+            stdscr.attroff(curses.color_pair(C_SELECTED) | curses.A_BOLD)
+        else:
+            stdscr.attron(curses.color_pair(color))
+            stdscr.addstr(y, 0, line[:w - 1])
+            stdscr.attroff(curses.color_pair(color))
+
+    for i in range(len(visible), list_h):
+        try:
+            stdscr.addstr(4 + i, 0, " " * (w - 1))
+        except curses.error:
+            pass
+
+
 # ── Tabs y dibujo ──────────────────────────────────────────────────────────
 
 TABS = [
@@ -1568,6 +1870,7 @@ TABS = [
     ("4", "Grep vivo",     "grep"),
     ("5", "Deploy",        "deploy"),
     ("6", "Multi-Deploy",  "multideploy"),
+    ("7", "Programados",   "programados"),
 ]
 
 
@@ -1606,7 +1909,6 @@ def draw_footer(stdscr, msg="", mode=""):
 
     if mode == "clientes":
         shortcuts = " Enter=SSH  F3=Detalle  F4=Editar  F2=Nuevo  Supr=Eliminar  q=Salir"
-        # Si hay mensaje de estado (error/éxito) lo mostramos en lugar de los atajos
         if msg and not msg.endswith("resultado(s)"):
             left = f" {msg}"
             right = ""
@@ -1614,8 +1916,11 @@ def draw_footer(stdscr, msg="", mode=""):
             left  = shortcuts
             right = f"  {msg} " if msg else ""
         line = left + right.rjust(w - 1 - len(left))
+    elif mode == "programados":
+        shortcuts = " Supr=Cancelar pendiente  F5/ESC=Actualizar  1-7=Tab  q=Salir "
+        line = f" {msg} " if msg else shortcuts
     else:
-        footer = " Enter=Acción  1-6=Tab  ESC=Borrar búsqueda  q=Salir "
+        footer = " Enter=Acción  1-7=Tab  ESC=Borrar búsqueda  q=Salir "
         line   = f" {msg} " if msg else footer
 
     stdscr.attron(curses.color_pair(C_STATUS))
@@ -1727,6 +2032,8 @@ def main(stdscr):
         print(f"  rm ~/.config/core-deploy/config.json && core-deploy\n")
         sys.exit(1)
 
+    usuario = HADES["user"]
+
     mode         = "clientes"
     search       = ""
     selected     = 0
@@ -1740,6 +2047,8 @@ def main(stdscr):
             try:
                 if mode == "maquinas":
                     rows = fetch_maquinas(search)
+                elif mode == "programados":
+                    rows = db_fetch_deploys_usuario(usuario)
                 else:
                     rows = fetch_clientes(search)
                 selected = min(selected, max(0, len(rows) - 1))
@@ -1758,7 +2067,10 @@ def main(stdscr):
 
         stdscr.erase()
         draw_header(stdscr, mode, search)
-        draw_list(stdscr, rows, selected, offset, mode)
+        if mode == "programados":
+            draw_programados(stdscr, rows, selected, offset)
+        else:
+            draw_list(stdscr, rows, selected, offset, mode)
         draw_footer(stdscr, status if status else f"{len(rows)} resultado(s)", mode=mode)
         stdscr.refresh()
 
@@ -1777,7 +2089,7 @@ def main(stdscr):
             break
 
         # ── Cambiar tab ────────────────────────────────────────────────────
-        elif key in (ord('1'), ord('2'), ord('3'), ord('4'), ord('5'), ord('6')):
+        elif key in (ord('1'), ord('2'), ord('3'), ord('4'), ord('5'), ord('6'), ord('7')):
             idx  = int(chr(key)) - 1
             mode = TABS[idx][2]
             search = ""; selected = 0; offset = 0
@@ -1872,7 +2184,18 @@ def main(stdscr):
                     continue
                 cbl = cbl_picker(stdscr, row)
                 if cbl:
-                    run_deploy(stdscr, row, cbl)
+                    when = deploy_when_picker(stdscr, f"DEPLOY — {row['desc_cliente']} — {cbl}")
+                    if when == "now":
+                        run_deploy(stdscr, row, cbl)
+                    elif when == "schedule":
+                        fh = ask_datetime(stdscr)
+                        if fh:
+                            db_insert_deploy_programado(
+                                usuario, row["nro_cliente"], row["desc_cliente"],
+                                [cbl], fh,
+                            )
+                            notify_scheduler()
+                            status = f"✓ Deploy de {cbl} programado para {fh.strftime('%d/%m/%Y %H:%M')}"
                 init_colors(); stdscr.keypad(True); stdscr.timeout(100)
                 needs_reload = True
 
@@ -1889,9 +2212,23 @@ def main(stdscr):
                     hint="Un archivo .cbl por línea  |  F10 o Ctrl+D = Iniciar  |  ESC = Cancelar",
                 )
                 if cbl_list:
-                    run_multi_deploy(stdscr, row, cbl_list)
+                    when = deploy_when_picker(stdscr, f"MULTI-DEPLOY — {row['desc_cliente']}")
+                    if when == "now":
+                        run_multi_deploy(stdscr, row, cbl_list)
+                    elif when == "schedule":
+                        fh = ask_datetime(stdscr)
+                        if fh:
+                            db_insert_deploy_programado(
+                                usuario, row["nro_cliente"], row["desc_cliente"],
+                                cbl_list, fh,
+                            )
+                            notify_scheduler()
+                            status = f"✓ {len(cbl_list)} servicio(s) programados para {fh.strftime('%d/%m/%Y %H:%M')}"
                 init_colors(); stdscr.keypad(True); stdscr.timeout(100)
                 needs_reload = True
+
+            elif mode == "programados":
+                pass  # Enter no hace nada en programados
 
         # ── Acciones CRUD (solo en tab Clientes) ──────────────────────────
         elif mode == "clientes" and key == curses.KEY_F3:
@@ -1940,15 +2277,44 @@ def main(stdscr):
                 stdscr.touchwin(); stdscr.refresh()
                 init_colors(); stdscr.keypad(True); stdscr.timeout(100)
 
+        elif mode == "programados" and key == curses.KEY_DC:
+            if rows:
+                dep = rows[selected]
+                if dep["estado"] == "pendiente":
+                    if confirm_dialog(stdscr, f"¿Cancelar deploy de '{dep['desc_cliente']}'?"):
+                        try:
+                            db_delete_deploy(dep["id"])
+                            status = f"✓ Deploy cancelado"
+                            selected = max(0, selected - 1)
+                        except Exception as ex:
+                            status = f"✗ Error: {ex}"
+                        needs_reload = True
+                else:
+                    status = f"Solo se pueden cancelar deploys pendientes"
+                stdscr.touchwin(); stdscr.refresh()
+                init_colors(); stdscr.keypad(True); stdscr.timeout(100)
+
         # ── Tipeo en búsqueda ──────────────────────────────────────────────
-        elif 32 <= key <= 126:
+        elif 32 <= key <= 126 and mode != "programados":
             search  += chr(key)
             selected = 0; offset = 0
             needs_reload = True
 
 
 def run():
-    curses.wrapper(main)
+    global _scheduler_running
+
+    ensure_deploys_table()
+
+    _scheduler_running = True
+    t = threading.Thread(target=_scheduler_loop, daemon=True)
+    t.start()
+
+    try:
+        curses.wrapper(main)
+    finally:
+        _scheduler_running = False
+        _scheduler_event.set()  # desbloquear el hilo para que termine
 
 
 if __name__ == "__main__":
