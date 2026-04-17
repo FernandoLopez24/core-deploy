@@ -69,16 +69,21 @@ echo "  [4/4] Verificando PATH..."
 
 add_to_path() {
     local rc="$1"
-    if [ -f "$rc" ] && ! grep -q 'local/bin' "$rc" 2>/dev/null; then
+    # crear si no existe (ej: .bash_profile en Ubuntu sin él)
+    touch "$rc" 2>/dev/null || return
+    if ! grep -q 'local/bin' "$rc" 2>/dev/null; then
         echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$rc"
         echo "        Agregado a $rc"
     fi
 }
 
-if ! echo "$PATH" | grep -q "$BIN_DIR"; then
-    add_to_path "$HOME/.bashrc"
-    add_to_path "$HOME/.zshrc"
-fi
+# Agregar a todos los archivos de inicio posibles para cubrir
+# login shells, non-login shells y zsh
+add_to_path "$HOME/.bashrc"
+add_to_path "$HOME/.bash_profile"
+add_to_path "$HOME/.profile"
+add_to_path "$HOME/.zshrc"
+add_to_path "$HOME/.zprofile"
 
 echo ""
 echo "  ✓ Instalación completa."
