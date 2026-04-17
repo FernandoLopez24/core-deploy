@@ -19,7 +19,7 @@ from collections import deque
 from datetime import datetime
 
 APP_NAME    = "core-deploy"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"
 APP_CREDIT  = "by Fernando · Síntesis"
 CONFIG_FILE = os.path.expanduser("~/.config/core-deploy/config.json")
 
