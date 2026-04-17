@@ -2111,8 +2111,17 @@ def draw_footer(stdscr, msg="", mode=""):
             right = f"  {msg} " if msg else ""
         line = left + right.rjust(w - 1 - len(left))
     elif mode == "programados":
-        shortcuts = " Supr=Cancelar pendiente  F5/ESC=Actualizar  1-7=Tab  q=Salir "
-        line = f" {msg} " if msg else shortcuts
+        shortcuts = " F4=Reprogramar  Supr=Cancelar/Eliminar  F5=Actualizar  1-7=Tab  q=Salir"
+        if msg and not msg.startswith("ERROR:") and not msg.endswith("resultado(s)"):
+            line = f" {msg} "
+        elif msg.startswith("ERROR:"):
+            left  = f" {msg} "
+            right = shortcuts
+            line  = left[:w - 1 - len(shortcuts)] + right if len(left) + len(shortcuts) > w - 1 else left + right.rjust(w - 1 - len(left))
+        else:
+            left  = shortcuts
+            right = f"  {msg} " if msg else ""
+            line  = left + right.rjust(w - 1 - len(left))
     else:
         footer = " Enter=Acción  1-7=Tab  ESC=Borrar búsqueda  q=Salir "
         line   = f" {msg} " if msg else footer
@@ -2480,6 +2489,30 @@ def main(stdscr):
                     except Exception as ex:
                         status = f"✗ Error: {ex}"
                     needs_reload = True
+                stdscr.touchwin(); stdscr.refresh()
+                init_colors(); stdscr.keypad(True); stdscr.timeout(100)
+
+        elif mode == "programados" and key == curses.KEY_F4:
+            if rows:
+                dep = rows[selected]
+                if dep["estado"] == "pendiente":
+                    nueva_fh = ask_datetime(stdscr, f"Reprogramar: {dep['desc_cliente']}")
+                    if nueva_fh:
+                        try:
+                            conn = get_connection()
+                            with conn.cursor() as cur:
+                                cur.execute(
+                                    "UPDATE deploys_programados SET fecha_hora=%s WHERE id=%s",
+                                    (nueva_fh, dep["id"]),
+                                )
+                            conn.commit()
+                            notify_scheduler()
+                            status = f"✓ Reprogramado para {nueva_fh.strftime('%d/%m/%Y %H:%M')}"
+                        except Exception as ex:
+                            status = f"✗ Error: {ex}"
+                        needs_reload = True
+                else:
+                    status = "Solo se pueden reprogramar deploys pendientes"
                 stdscr.touchwin(); stdscr.refresh()
                 init_colors(); stdscr.keypad(True); stdscr.timeout(100)
 
