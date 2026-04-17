@@ -808,6 +808,11 @@ def _sshenv(password=""):
     return e
 
 
+def _clean_ip(ip):
+    """Elimina notación CIDR si la hubiera (ej: 192.168.1.1/32 → 192.168.1.1)."""
+    return str(ip).split("/")[0].strip()
+
+
 def ssh_cmd_base(ip, user, port):
     """Comando SSH base. Usar junto con env=_sshenv(password) en subprocess."""
     return [
@@ -817,7 +822,7 @@ def ssh_cmd_base(ip, user, port):
         "-o", "UserKnownHostsFile=/dev/null",
         "-o", "LogLevel=QUIET",
         "-p", str(port),
-        f"{user}@{ip}",
+        f"{user}@{_clean_ip(ip)}",
     ]
 
 
@@ -1345,7 +1350,7 @@ def run_deploy(stdscr, row, cbl_file):
             "-o", "LogLevel=QUIET",
             "-P", str(port),
             local_tmp,
-            f"{user}@{ip}:{path_prod}/{int_file}",
+            f"{user}@{_clean_ip(ip)}:{path_prod}/{int_file}",
         ]
         if not run_step(3, cmd4, timeout=60, env=ssh_env):
             error = True
@@ -1562,7 +1567,7 @@ def _deploy_one_silent(row, cbl_file, build_content, log_cb):
         "sshpass", "-e", "scp",
         "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
         "-o", "LogLevel=QUIET", "-P", str(port),
-        local_tmp, f"{user}@{ip}:{path_prod}/{int_file}",
+        local_tmp, f"{user}@{_clean_ip(ip)}:{path_prod}/{int_file}",
     ], timeout=60, env=ssh_env)
     if not ok:
         return False, f"Error subiendo .int: {out[-200:]}"
