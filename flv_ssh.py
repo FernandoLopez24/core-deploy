@@ -2032,6 +2032,8 @@ def main(stdscr):
         print(f"  rm ~/.config/core-deploy/config.json && core-deploy\n")
         sys.exit(1)
 
+    ensure_deploys_table()
+
     usuario = HADES["user"]
 
     mode         = "clientes"
@@ -2303,8 +2305,6 @@ def main(stdscr):
 
 def run():
     global _scheduler_running
-
-    ensure_deploys_table()
 
     _scheduler_running = True
     t = threading.Thread(target=_scheduler_loop, daemon=True)
