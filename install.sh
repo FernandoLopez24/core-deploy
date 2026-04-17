@@ -49,8 +49,20 @@ python3 -c "import psycopg2" 2>/dev/null && echo "        ya instalado." || {
 # ── 3. Descargar core-deploy ──────────────────────────────────────────────
 echo "  [3/4] Descargando core-deploy..."
 mkdir -p "$BIN_DIR"
-curl -fsSL "$REPO_URL" -o "$BIN_PATH"
-chmod +x "$BIN_PATH"
+
+if curl -fSL "$REPO_URL" -o "$BIN_PATH" 2>&1; then
+    chmod +x "$BIN_PATH"
+    echo "        descargado en $BIN_PATH"
+else
+    echo ""
+    echo "  ✗ Error descargando el script. Verificá tu conexión a internet."
+    exit 1
+fi
+
+if [ ! -s "$BIN_PATH" ]; then
+    echo "  ✗ El archivo descargado está vacío."
+    exit 1
+fi
 
 # ── 4. PATH ───────────────────────────────────────────────────────────────
 echo "  [4/4] Verificando PATH..."
