@@ -84,8 +84,6 @@ echo ""
 echo "  ✓ Instalación completa."
 echo ""
 
-echo "  Ejecutá estos dos comandos:"
 echo ""
-echo "    source ~/.bashrc"
-echo "    core-deploy"
-echo ""
+# Lanzar directamente con ruta completa — sin depender del PATH
+exec "$BIN_PATH"
