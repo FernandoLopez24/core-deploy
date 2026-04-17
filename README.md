@@ -4,12 +4,13 @@ Herramienta de terminal (TUI) para gestión de servidores, visualización de log
 
 ## Características
 
-- **Clientes** — lista de clientes con acceso SSH directo al path de producción
-- **Servidores** — gestión de máquinas de la red interna
-- **Logs en tiempo real** — visor de logs con scroll y pausa
-- **Grep vivo** — filtrado de logs en tiempo real con patrón grep
-- **Deploy COBOL** — pipeline completo: compilar en hades → descargar .int → backup → subir a producción → make
-- **Multi-Deploy** — deploy secuencial de varios servicios .cbl a la vez
+- **[1] Clientes** — lista de clientes con acceso SSH directo al path de producción
+- **[2] Servidores** — gestión de máquinas de la red interna
+- **[3] Logs en tiempo real** — visor de logs con scroll y pausa
+- **[4] Grep vivo** — filtrado de logs en tiempo real con patrón grep
+- **[5] Deploy** — pipeline completo: compilar en hades → descargar .int → backup → subir a producción → make
+- **[6] Multi-Deploy** — deploy secuencial de varios servicios .cbl a la vez
+- **[7] Programados** — programa deploys para una fecha y hora específica; cada usuario ve y gestiona solo los suyos
 
 ## Requisitos
 
@@ -108,10 +109,10 @@ core-deploy
 | `↑` `↓` | Moverse por la lista |
 | Escribir | Buscar / filtrar en tiempo real |
 | `ESC` | Limpiar búsqueda |
-| `1`–`6` | Cambiar de pestaña |
+| `1`–`7` | Cambiar de pestaña |
 | `q` | Salir |
 
-### Atajos en pestaña Clientes
+### Atajos en pestaña Clientes `[1]`
 
 | Tecla | Acción |
 |---|---|
@@ -121,7 +122,7 @@ core-deploy
 | `F4` | Editar cliente |
 | `Supr` | Eliminar cliente |
 
-### Logs / Grep vivo
+### Logs / Grep vivo `[3]` `[4]`
 
 | Tecla | Acción |
 |---|---|
@@ -129,6 +130,36 @@ core-deploy
 | `↑` `↓` / `PgUp` `PgDn` | Scroll |
 | `Fin` | Volver al final (en vivo) |
 | `q` / `ESC` | Volver |
+
+### Deploy y Multi-Deploy `[5]` `[6]`
+
+Al seleccionar un cliente y los servicios, la herramienta pregunta:
+
+```
+¿Cuándo ejecutar?
+  ► Ejecutar ahora
+    Programar para después
+```
+
+Si elegís **Programar**, pedirá fecha y hora en formato `DD/MM/AAAA HH:MM`.
+
+### Programados `[7]`
+
+| Tecla | Acción |
+|---|---|
+| `Supr` | Cancelar un deploy pendiente |
+| `F5` / `ESC` | Actualizar la lista |
+
+Cada usuario ve únicamente sus propios deploys programados. Los estados posibles son:
+
+| Estado | Significado |
+|---|---|
+| `PENDIENTE` | Esperando su hora de ejecución |
+| `EJECUTANDO` | En proceso en este momento |
+| `OK` | Completado con éxito |
+| `ERROR` | Falló — ver detalle en la BD |
+
+El scheduler corre en segundo plano con consumo mínimo de CPU: duerme exactamente hasta el próximo deploy programado y se despierta al instante cuando agregás uno nuevo.
 
 ## Actualizar
 
@@ -145,7 +176,7 @@ source ~/.bashrc
 ```
 
 **`Error conectando a la base de datos`**
-- Verificá que estás conectado a la red interna de Síntesis
+- Verificá que estás conectado a la VPN o a la red interna de Síntesis
 - Revisá las credenciales: `rm ~/.config/core-deploy/config.json && core-deploy`
 
 **`Warning: Identity file not accessible`**
