@@ -1767,16 +1767,131 @@ def ask_input(stdscr, prompt):
 
 # ── Widgets de deploy programado ─────────────────────────────────────────
 
-def ask_datetime(stdscr, prompt="Fecha y hora (DD/MM/AAAA HH:MM): "):
-    """Pide una fecha/hora con validación. Devuelve datetime o None."""
-    while True:
-        raw = ask_input(stdscr, prompt)
-        if not raw:
-            return None
+def ask_datetime(stdscr, prompt="Seleccioná fecha y hora:"):
+    """Calendario interactivo para elegir fecha y hora. Devuelve datetime o None."""
+    import calendar as _cal
+
+    now     = datetime.now()
+    year    = now.year
+    month   = now.month
+    day     = now.day
+    hour    = now.hour
+    minute  = now.minute
+    focus   = "cal"   # "cal" | "hour" | "minute"
+
+    DIAS    = ["Lu", "Ma", "Mi", "Ju", "Vi", "Sá", "Do"]
+    MESES   = ["Enero","Febrero","Marzo","Abril","Mayo","Junio",
+               "Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"]
+
+    def draw():
+        stdscr.erase()
+        h, w = stdscr.getmaxyx()
+
+        stdscr.attron(curses.color_pair(C_HEADER) | curses.A_BOLD)
+        stdscr.addstr(0, 0, f" {prompt} ".ljust(w - 1))
+        stdscr.attroff(curses.color_pair(C_HEADER) | curses.A_BOLD)
+
+        # Cabecera mes/año
+        titulo = f"◄  {MESES[month-1]} {year}  ►"
+        stdscr.addstr(2, 4, titulo, curses.color_pair(C_TITLE) | curses.A_BOLD)
+
+        # Días de semana
+        stdscr.attron(curses.color_pair(C_TITLE) | curses.A_BOLD)
+        for i, d in enumerate(DIAS):
+            stdscr.addstr(3, 4 + i * 4, f"{d:>3}")
+        stdscr.attroff(curses.color_pair(C_TITLE) | curses.A_BOLD)
+
+        # Días del mes
+        first_wd, days_in_month = _cal.monthrange(year, month)
+        row_y = 4
+        col   = first_wd
+        for d in range(1, days_in_month + 1):
+            x = 4 + col * 4
+            if d == day and focus == "cal":
+                stdscr.attron(curses.color_pair(C_SELECTED) | curses.A_BOLD)
+                stdscr.addstr(row_y, x, f"{d:>3}")
+                stdscr.attroff(curses.color_pair(C_SELECTED) | curses.A_BOLD)
+            elif d == day:
+                stdscr.addstr(row_y, x, f"{d:>3}", curses.color_pair(C_OK) | curses.A_BOLD)
+            else:
+                stdscr.addstr(row_y, x, f"{d:>3}")
+            col += 1
+            if col > 6:
+                col = 0
+                row_y += 1
+
+        # Hora y minuto
+        sep_y = row_y + 2
         try:
-            return datetime.strptime(raw.strip(), "%d/%m/%Y %H:%M")
-        except ValueError:
-            _show_message(stdscr, "Formato inválido. Usá DD/MM/AAAA HH:MM", error=True)
+            stdscr.attron(curses.color_pair(C_TITLE))
+            stdscr.addstr(sep_y, 0, "─" * (w - 1))
+            stdscr.attroff(curses.color_pair(C_TITLE))
+
+            stdscr.addstr(sep_y + 1, 4, "Hora: ", curses.A_BOLD)
+            h_attr = (curses.color_pair(C_SELECTED) | curses.A_BOLD) if focus == "hour"  else curses.color_pair(C_NORMAL)
+            m_attr = (curses.color_pair(C_SELECTED) | curses.A_BOLD) if focus == "minute" else curses.color_pair(C_NORMAL)
+            stdscr.addstr(sep_y + 1, 10, f" {hour:02d} ", h_attr)
+            stdscr.addstr(sep_y + 1, 14, ":",  curses.A_BOLD)
+            stdscr.addstr(sep_y + 1, 16, f" {minute:02d} ", m_attr)
+        except curses.error:
+            pass
+
+        stdscr.attron(curses.color_pair(C_STATUS))
+        stdscr.addstr(h - 1, 0,
+            " ←→↑↓=Navegar  PgUp/PgDn=Mes  Tab=Hora/Min  Enter=Confirmar  ESC=Cancelar ".ljust(w - 1))
+        stdscr.attroff(curses.color_pair(C_STATUS))
+        stdscr.refresh()
+
+    while True:
+        draw()
+        key = stdscr.getch()
+
+        if key == 27:
+            return None
+
+        elif key == 9:   # Tab — rotar entre cal/hour/minute
+            focus = {"cal": "hour", "hour": "minute", "minute": "cal"}[focus]
+
+        elif key in (curses.KEY_ENTER, 10, 13):
+            try:
+                return datetime(year, month, day, hour, minute)
+            except ValueError:
+                pass
+
+        elif focus == "cal":
+            _, days_in_month = _cal.monthrange(year, month)
+            if key == curses.KEY_RIGHT:
+                day = min(day + 1, days_in_month)
+            elif key == curses.KEY_LEFT:
+                day = max(day - 1, 1)
+            elif key == curses.KEY_DOWN:
+                day = min(day + 7, days_in_month)
+            elif key == curses.KEY_UP:
+                day = max(day - 7, 1)
+            elif key == curses.KEY_PPAGE:   # mes anterior
+                month -= 1
+                if month < 1:
+                    month = 12; year -= 1
+                _, dim = _cal.monthrange(year, month)
+                day = min(day, dim)
+            elif key == curses.KEY_NPAGE:   # mes siguiente
+                month += 1
+                if month > 12:
+                    month = 1; year += 1
+                _, dim = _cal.monthrange(year, month)
+                day = min(day, dim)
+
+        elif focus == "hour":
+            if key in (curses.KEY_UP, curses.KEY_RIGHT):
+                hour = (hour + 1) % 24
+            elif key in (curses.KEY_DOWN, curses.KEY_LEFT):
+                hour = (hour - 1) % 24
+
+        elif focus == "minute":
+            if key in (curses.KEY_UP, curses.KEY_RIGHT):
+                minute = (minute + 5) % 60
+            elif key in (curses.KEY_DOWN, curses.KEY_LEFT):
+                minute = (minute - 5) % 60
 
 
 def deploy_when_picker(stdscr, titulo=""):
@@ -2128,6 +2243,9 @@ def main(stdscr):
         elif key in (curses.KEY_ENTER, 10, 13):
             if not rows:
                 status = "No hay resultados"
+                continue
+
+            if mode == "programados":
                 continue
 
             row      = rows[selected]
