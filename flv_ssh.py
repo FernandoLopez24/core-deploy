@@ -29,7 +29,7 @@ CONFIG_FILE = os.path.expanduser("~/.config/core-deploy/config.json")
 # ── SMTP corporativo (fijo para todos) ────────────────────────────────────
 SMTP_HOST = "199.14.10.83"
 SMTP_PORT = 25
-SMTP_FROM = "no-reply@sintesis.com.bo"
+SMTP_FROM = "coredeploy@sintesis.com.bo"
 
 # ── Configuración de la BD (se rellena al cargar config) ──────────────────
 DB_CONFIG = {
