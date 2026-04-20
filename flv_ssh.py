@@ -2065,6 +2065,7 @@ TABS = [
     ("5", "Deploy",        "deploy"),
     ("6", "Multi-Deploy",  "multideploy"),
     ("7", "Programados",   "programados"),
+    ("8", "Reinicio",      "reinicio"),
 ]
 
 
@@ -2101,7 +2102,12 @@ def draw_header(stdscr, mode, search):
 def draw_footer(stdscr, msg="", mode=""):
     h, w = stdscr.getmaxyx()
 
-    if mode == "clientes":
+    if mode == "reinicio":
+        shortcuts = " Enter=Reiniciar dominio  1-8=Tab  q=Salir"
+        left  = shortcuts
+        right = f"  {msg} " if msg else ""
+        line  = left + right.rjust(w - 1 - len(left))
+    elif mode == "clientes":
         shortcuts = " Enter=SSH  F3=Detalle  F4=Editar  F2=Nuevo  Supr=Eliminar  q=Salir"
         if msg and not msg.endswith("resultado(s)"):
             left = f" {msg}"
@@ -2242,6 +2248,203 @@ def read_key(stdscr):
     return 27  # secuencia desconocida → tratar como ESC
 
 
+# ── Reinicio de dominio Tuxedo ─────────────────────────────────────────────
+
+def reinicio_tuxedo(stdscr, row):
+    """Reinicia el dominio Tuxedo: tmshutdown -y → opcional tmipcrm -y → tmboot -y."""
+    ip       = row["ip"]
+    user     = row["ssh_user"]
+    password = row["ssh_password"]
+    port     = row["ssh_port"]
+    path     = row.get("path") or ""
+    nombre   = row.get("desc_cliente", ip)
+
+    if not path:
+        _show_message(stdscr, "Este cliente no tiene PATH configurado", error=True)
+        return
+
+    if not confirm_dialog(stdscr, f"¿Reiniciar dominio de '{nombre}'?"):
+        return
+
+    STALL_SECS = 30
+
+    lines     = deque(maxlen=500)
+    phase_txt = ["—"]
+    cancelled = [False]
+
+    def draw(footer=""):
+        h, w = stdscr.getmaxyx()
+        stdscr.erase()
+        title = f" REINICIO — {nombre}  [{user}@{_clean_ip(ip)}]  {path} "
+        stdscr.attron(curses.color_pair(C_HEADER) | curses.A_BOLD)
+        try:
+            stdscr.addstr(0, 0, title[:w - 1].ljust(w - 1))
+        except curses.error:
+            pass
+        stdscr.attroff(curses.color_pair(C_HEADER) | curses.A_BOLD)
+        stdscr.attron(curses.color_pair(C_TITLE) | curses.A_BOLD)
+        try:
+            stdscr.addstr(1, 0, f" Fase: {phase_txt[0]} "[:w - 1].ljust(w - 1))
+        except curses.error:
+            pass
+        stdscr.attroff(curses.color_pair(C_TITLE) | curses.A_BOLD)
+        try:
+            stdscr.addstr(2, 0, "─" * (w - 1), curses.color_pair(C_DIM))
+        except curses.error:
+            pass
+        log_h   = h - 5
+        visible = list(lines)[-(log_h):]
+        for i, line in enumerate(visible):
+            try:
+                stdscr.addstr(3 + i, 0, line[:w - 1])
+            except curses.error:
+                pass
+        stdscr.attron(curses.color_pair(C_STATUS))
+        try:
+            stdscr.addstr(h - 1, 0, footer[:w - 1].ljust(w - 1))
+        except curses.error:
+            pass
+        stdscr.attroff(curses.color_pair(C_STATUS))
+        stdscr.refresh()
+
+    def run_phase(cmd_str, phase_name, stall_timeout=None):
+        phase_txt[0] = phase_name
+        lines.append("")
+        lines.append(f"▶ {phase_name}")
+        lines.append(f"  $ {cmd_str}")
+        lines.append("")
+        draw(f" {phase_name}... q=Cancelar")
+
+        ssh = ssh_cmd_base(ip, user, port)
+        ssh.insert(3, "-tt")
+        ssh.append(f'cd "{path}" && . ./env.pro && {cmd_str}')
+
+        proc = subprocess.Popen(
+            ssh,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            bufsize=0,
+            env=_sshenv(password),
+        )
+        fl = fcntl.fcntl(proc.stdout.fileno(), fcntl.F_GETFL)
+        fcntl.fcntl(proc.stdout.fileno(), fcntl.F_SETFL, fl | os.O_NONBLOCK)
+
+        stdscr.nodelay(True)
+        start       = time.time()
+        last_output = time.time()
+        force_used  = False
+
+        try:
+            while proc.poll() is None:
+                try:
+                    raw = proc.stdout.read(4096)
+                    if raw:
+                        for ln in raw.decode("utf-8", errors="replace").splitlines():
+                            if ln.strip():
+                                lines.append(f"  {ln}")
+                        last_output = time.time()
+                except (BlockingIOError, TypeError):
+                    pass
+
+                elapsed = int(time.time() - start)
+                stalled = stall_timeout and (time.time() - last_output > stall_timeout)
+
+                if stalled:
+                    force_used  = True
+                    lines.append(f"  [!] Sin respuesta por {stall_timeout}s → Ctrl+C + y")
+                    draw(f" {phase_name}  {elapsed}s  ⚠ COLGADO — enviando Ctrl+C...")
+                    try:
+                        proc.stdin.write(b'\x03')
+                        proc.stdin.flush()
+                    except Exception:
+                        pass
+                    time.sleep(0.4)
+                    try:
+                        proc.stdin.write(b'y\n')
+                        proc.stdin.flush()
+                    except Exception:
+                        pass
+                    last_output = time.time()
+                else:
+                    draw(f" {phase_name}  {elapsed}s  q=Cancelar")
+
+                k = stdscr.getch()
+                if k in (ord('q'), ord('Q'), 27):
+                    cancelled[0] = True
+                    try:
+                        proc.stdin.write(b'\x03')
+                        proc.stdin.flush()
+                    except Exception:
+                        pass
+                    break
+
+                time.sleep(0.1)
+
+            try:
+                rest = proc.stdout.read()
+                if rest:
+                    for ln in rest.decode("utf-8", errors="replace").splitlines():
+                        if ln.strip():
+                            lines.append(f"  {ln}")
+            except Exception:
+                pass
+
+        finally:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            try:
+                proc.wait(timeout=3)
+            except Exception:
+                pass
+            stdscr.nodelay(False)
+
+        return force_used
+
+    # ── Fase 1: Bajada ────────────────────────────────────────────────────────
+    force = run_phase("tmshutdown -y", "BAJADA", stall_timeout=STALL_SECS)
+
+    # ── Fase 2: Limpieza IPC si hubo cierre forzado ───────────────────────────
+    if not cancelled[0] and force:
+        lines.append("")
+        lines.append("  [!] Bajada forzada → ejecutando tmipcrm para limpiar IPC...")
+        run_phase("tmipcrm -y", "LIMPIEZA IPC")
+
+    # ── Fase 3: Subida ────────────────────────────────────────────────────────
+    if not cancelled[0]:
+        run_phase("tmboot -y", "SUBIDA")
+
+    # ── Footer final ──────────────────────────────────────────────────────────
+    lines.append("")
+    if cancelled[0]:
+        phase_txt[0] = "CANCELADO"
+        lines.append("  ✗ Reinicio cancelado.")
+        footer = " ✗ Cancelado — Enter/q para volver"
+        color  = C_ERROR
+    else:
+        phase_txt[0] = "COMPLETADO"
+        lines.append("  ✓ Reinicio completado.")
+        footer = " ✓ Reinicio completado — Enter/q para volver"
+        color  = C_OK
+
+    draw("")
+    h, w = stdscr.getmaxyx()
+    stdscr.attron(curses.color_pair(color) | curses.A_BOLD)
+    try:
+        stdscr.addstr(h - 1, 0, footer[:w - 1].ljust(w - 1))
+    except curses.error:
+        pass
+    stdscr.attroff(curses.color_pair(color) | curses.A_BOLD)
+    stdscr.refresh()
+
+    while True:
+        k = stdscr.getch()
+        if k in (ord('q'), ord('Q'), 27, curses.KEY_ENTER, 10, 13):
+            break
+
+
 # ── Loop principal ─────────────────────────────────────────────────────────
 
 def main(stdscr):
@@ -2347,7 +2550,7 @@ def main(stdscr):
             break
 
         # ── Cambiar tab ────────────────────────────────────────────────────
-        elif key in (ord('1'), ord('2'), ord('3'), ord('4'), ord('5'), ord('6'), ord('7')):
+        elif key in (ord('1'), ord('2'), ord('3'), ord('4'), ord('5'), ord('6'), ord('7'), ord('8')):
             idx  = int(chr(key)) - 1
             mode = TABS[idx][2]
             search = ""; selected = 0; offset = 0
@@ -2490,6 +2693,14 @@ def main(stdscr):
 
             elif mode == "programados":
                 pass  # Enter no hace nada en programados
+
+            elif mode == "reinicio":
+                if not row.get("path"):
+                    status = f"Sin path para {row['desc_cliente']}"
+                    continue
+                reinicio_tuxedo(stdscr, row)
+                init_colors(); stdscr.keypad(True); stdscr.timeout(100)
+                needs_reload = True
 
         # ── Acciones CRUD (solo en tab Clientes) ──────────────────────────
         elif mode == "clientes" and key == curses.KEY_F3:
