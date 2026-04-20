@@ -2206,21 +2206,27 @@ _ESC_SEQUENCES = {
     (ord('['), ord('['), ord('C')): curses.KEY_F3,
     (ord('['), ord('['), ord('D')): curses.KEY_F4,
     (ord('['), ord('['), ord('E')): curses.KEY_F5,
-    # xterm/VT100: \x1bOP-OS → F1-F4
+    # xterm/VT100 SS3: \x1bOP-OS → F1-F4
     (ord('O'), ord('P')): curses.KEY_F1,
     (ord('O'), ord('Q')): curses.KEY_F2,
     (ord('O'), ord('R')): curses.KEY_F3,
     (ord('O'), ord('S')): curses.KEY_F4,
+    # rxvt/xterm CSI: \x1b[11~-\x1b[15~ → F1-F5
+    (ord('['), ord('1'), ord('1'), ord('~')): curses.KEY_F1,
+    (ord('['), ord('1'), ord('2'), ord('~')): curses.KEY_F2,
+    (ord('['), ord('1'), ord('3'), ord('~')): curses.KEY_F3,
+    (ord('['), ord('1'), ord('4'), ord('~')): curses.KEY_F4,
+    (ord('['), ord('1'), ord('5'), ord('~')): curses.KEY_F5,
 }
 
 def read_key(stdscr):
     key = stdscr.getch()
     if key != 27:
         return key
-    # ESC recibido: leer hasta 3 chars más con timeout corto
+    # ESC recibido: leer hasta 5 chars con timeout corto para armar la secuencia
     stdscr.timeout(50)
     seq = []
-    for _ in range(3):
+    for _ in range(5):
         ch = stdscr.getch()
         if ch == -1:
             break
@@ -2228,13 +2234,11 @@ def read_key(stdscr):
     stdscr.timeout(100)
     if not seq:
         return 27  # ESC solo
-    mapped = _ESC_SEQUENCES.get(tuple(seq))
-    if mapped is not None:
-        return mapped
-    # secuencia de 2 chars también
-    mapped = _ESC_SEQUENCES.get(tuple(seq[:2]))
-    if mapped is not None:
-        return mapped
+    # buscar coincidencia desde la secuencia más larga posible
+    for length in range(len(seq), 0, -1):
+        mapped = _ESC_SEQUENCES.get(tuple(seq[:length]))
+        if mapped is not None:
+            return mapped
     return 27  # secuencia desconocida → tratar como ESC
 
 
