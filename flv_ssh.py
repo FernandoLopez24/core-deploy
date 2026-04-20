@@ -733,8 +733,73 @@ _scheduler_event   = threading.Event()
 _scheduler_running = False
 
 
+def _run_scheduled_reinicio(deploy):
+    """Ejecuta un reinicio de dominio Tuxedo programado (sin UI curses)."""
+    ip       = str(deploy["ip"]).split("/")[0].strip()
+    user     = deploy["ssh_user"]
+    password = deploy["ssh_password"]
+    port     = deploy["ssh_port"]
+    path     = deploy["path"] or ""
+    STALL    = 30
+
+    def run_cmd(cmd_str):
+        ssh = ssh_cmd_base(ip, user, port)
+        ssh.insert(3, "-tt")
+        ssh.append(f'cd "{path}" && . ./env.pro && {cmd_str}')
+        proc = subprocess.Popen(
+            ssh, stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            bufsize=0, env=_sshenv(password),
+        )
+        fl = fcntl.fcntl(proc.stdout.fileno(), fcntl.F_GETFL)
+        fcntl.fcntl(proc.stdout.fileno(), fcntl.F_SETFL, fl | os.O_NONBLOCK)
+        out        = []
+        last_out   = time.time()
+        force_used = False
+        while proc.poll() is None:
+            try:
+                raw = proc.stdout.read(4096)
+                if raw:
+                    out.append(raw.decode("utf-8", errors="replace"))
+                    last_out = time.time()
+            except (BlockingIOError, TypeError):
+                pass
+            if time.time() - last_out > STALL:
+                force_used = True
+                try:
+                    proc.stdin.write(b'\x03'); proc.stdin.flush()
+                    time.sleep(0.4)
+                    proc.stdin.write(b'y\n');  proc.stdin.flush()
+                except Exception:
+                    pass
+                last_out = time.time()
+            time.sleep(0.1)
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        return force_used, "".join(out)
+
+    logs = []
+    force, out = run_cmd("tmshutdown -y")
+    logs.append(f"tmshutdown:\n{out.strip()}")
+    if force:
+        _, out2 = run_cmd("tmipcrm -y")
+        logs.append(f"tmipcrm:\n{out2.strip()}")
+    _, out3 = run_cmd("tmboot -y")
+    logs.append(f"tmboot:\n{out3.strip()}")
+
+    estado = "ok"
+    detalle = "\n\n".join(logs)
+    db_update_deploy_estado(deploy["id"], estado, detalle)
+
+
 def _run_scheduled_deploy(deploy):
-    """Ejecuta un deploy programado en segundo plano (sin UI curses)."""
+    """Ejecuta un deploy o reinicio programado en segundo plano (sin UI curses)."""
+    if deploy["servicios"] == ["__reinicio__"]:
+        _run_scheduled_reinicio(deploy)
+        return
+
     servicios = deploy["servicios"]
     row = {
         "ip":           deploy["ip"],
@@ -2013,13 +2078,13 @@ def deploy_when_picker(stdscr, titulo=""):
 
 
 def draw_programados(stdscr, rows, selected, offset):
-    """Dibuja la lista de deploys programados del usuario."""
+    """Dibuja la lista de deploys/reinicios programados del usuario."""
     h, w   = stdscr.getmaxyx()
-    list_h = h - 5
+    list_h = h - 6
 
-    header = f"  {'CLIENTE':<22}  {'SERVICIOS':<25}  {'FECHA/HORA':<17}  {'ESTADO'}"
+    header = f"  {'CLIENTE':<22}  {'TIPO/SERVICIOS':<25}  {'FECHA/HORA':<17}  {'ESTADO'}"
     stdscr.attron(curses.color_pair(C_TITLE) | curses.A_BOLD)
-    stdscr.addstr(3, 0, header[:w - 1].ljust(w - 1))
+    stdscr.addstr(4, 0, header[:w - 1].ljust(w - 1))
     stdscr.attroff(curses.color_pair(C_TITLE) | curses.A_BOLD)
 
     ESTADO_COLOR = {
@@ -2031,14 +2096,15 @@ def draw_programados(stdscr, rows, selected, offset):
 
     visible = rows[offset: offset + list_h]
     for i, dep in enumerate(visible):
-        y     = 4 + i
+        y     = 5 + i
         abs_i = offset + i
-        svcs  = ", ".join(dep["servicios"])
+        svcs  = dep["servicios"]
+        tipo  = "⟳ REINICIO" if svcs == ["__reinicio__"] else ", ".join(svcs)
         fh    = dep["fecha_hora"].strftime("%d/%m/%Y %H:%M") \
                 if hasattr(dep["fecha_hora"], "strftime") else str(dep["fecha_hora"])[:16]
         est   = dep["estado"]
         color = ESTADO_COLOR.get(est, C_NORMAL)
-        line  = f"  {dep['desc_cliente']:<22}  {svcs:<25}  {fh:<17}  {est.upper()}"
+        line  = f"  {dep['desc_cliente']:<22}  {tipo:<25}  {fh:<17}  {est.upper()}"
         if abs_i == selected:
             stdscr.attron(curses.color_pair(C_SELECTED) | curses.A_BOLD)
             stdscr.addstr(y, 0, line[:w - 1].ljust(w - 1))
@@ -2050,7 +2116,7 @@ def draw_programados(stdscr, rows, selected, offset):
 
     for i in range(len(visible), list_h):
         try:
-            stdscr.addstr(4 + i, 0, " " * (w - 1))
+            stdscr.addstr(5 + i, 0, " " * (w - 1))
         except curses.error:
             pass
 
@@ -2076,26 +2142,27 @@ def draw_header(stdscr, mode, search):
     stdscr.attron(curses.color_pair(C_HEADER))
     stdscr.addstr(0, 0, " " * (w - 1))
     stdscr.addstr(0, max(0, (w - len(title)) // 2), title, curses.A_BOLD)
-    # Crédito pequeño en esquina derecha
     try:
         stdscr.addstr(0, w - len(credit) - 1, credit, curses.color_pair(C_DIM))
     except curses.error:
         pass
     stdscr.attroff(curses.color_pair(C_HEADER))
 
-    stdscr.addstr(1, 0, " " * (w - 1))
-    x = 2
-    for key, label, m in TABS:
-        tab_txt = f" [{key}] {label} "
-        if m == mode:
-            stdscr.addstr(1, x, tab_txt, curses.color_pair(C_SELECTED) | curses.A_BOLD)
-        else:
-            stdscr.addstr(1, x, tab_txt, curses.color_pair(C_DIM))
-        x += len(tab_txt) + 1
+    # Tabs en 2 filas: [1-4] Acceso/Monitoreo  |  [5-8] Operaciones
+    for row_idx, group in enumerate((TABS[:4], TABS[4:])):
+        stdscr.addstr(1 + row_idx, 0, " " * (w - 1))
+        x = 2
+        for key, label, m in group:
+            tab_txt = f" [{key}] {label} "
+            if m == mode:
+                stdscr.addstr(1 + row_idx, x, tab_txt, curses.color_pair(C_SELECTED) | curses.A_BOLD)
+            else:
+                stdscr.addstr(1 + row_idx, x, tab_txt, curses.color_pair(C_DIM))
+            x += len(tab_txt) + 1
 
     stdscr.attron(curses.color_pair(C_SEARCH))
-    stdscr.addstr(2, 0, " " * (w - 1))
-    stdscr.addstr(2, 2, f" Buscar: {search}_")
+    stdscr.addstr(3, 0, " " * (w - 1))
+    stdscr.addstr(3, 2, f" Buscar: {search}_")
     stdscr.attroff(curses.color_pair(C_SEARCH))
 
 
@@ -2117,7 +2184,7 @@ def draw_footer(stdscr, msg="", mode=""):
             right = f"  {msg} " if msg else ""
         line = left + right.rjust(w - 1 - len(left))
     elif mode == "programados":
-        shortcuts = " F4=Reprogramar  Supr=Cancelar/Eliminar  F5=Actualizar  1-7=Tab  q=Salir"
+        shortcuts = " F4=Reprogramar  Supr=Cancelar/Eliminar  F5=Actualizar  1-8=Tab  q=Salir"
         if msg and not msg.startswith("ERROR:") and not msg.endswith("resultado(s)"):
             line = f" {msg} "
         elif msg.startswith("ERROR:"):
@@ -2129,7 +2196,7 @@ def draw_footer(stdscr, msg="", mode=""):
             right = f"  {msg} " if msg else ""
             line  = left + right.rjust(w - 1 - len(left))
     else:
-        footer = " Enter=Acción  1-7=Tab  ESC=Borrar búsqueda  q=Salir "
+        footer = " Enter=Acción  1-8=Tab  ESC=Borrar búsqueda  q=Salir "
         line   = f" {msg} " if msg else footer
 
     stdscr.attron(curses.color_pair(C_STATUS))
@@ -2139,8 +2206,8 @@ def draw_footer(stdscr, msg="", mode=""):
 
 def draw_list(stdscr, rows, selected, offset, mode):
     h, w    = stdscr.getmaxyx()
-    list_h  = h - 5
-    start_y = 4
+    list_h  = h - 6
+    start_y = 5
 
     if mode == "maquinas":
         col_header = f"{'SERVIDOR':<20}  {'IP':<16}  {'USUARIO':<12}  {'PUERTO'}  {'DESCRIPCIÓN'}"
@@ -2150,7 +2217,7 @@ def draw_list(stdscr, rows, selected, offset, mode):
         col_header = f"{'#':>5}  {'CLIENTE':<25}  {'SERVIDOR':<15}  {'IP':<16}  {'PATH'}"
 
     stdscr.attron(curses.color_pair(C_TITLE) | curses.A_BOLD)
-    stdscr.addstr(3, 0, col_header[:w - 1].ljust(w - 1))
+    stdscr.addstr(4, 0, col_header[:w - 1].ljust(w - 1))
     stdscr.attroff(curses.color_pair(C_TITLE) | curses.A_BOLD)
 
     visible = rows[offset: offset + list_h]
@@ -2263,7 +2330,19 @@ def reinicio_tuxedo(stdscr, row):
         _show_message(stdscr, "Este cliente no tiene PATH configurado", error=True)
         return
 
-    if not confirm_dialog(stdscr, f"¿Reiniciar dominio de '{nombre}'?"):
+    when = deploy_when_picker(stdscr, f"REINICIO — {nombre}")
+    if when is None:
+        return
+
+    if when == "schedule":
+        fh = ask_datetime(stdscr)
+        if fh:
+            db_insert_deploy_programado(
+                row.get("ssh_user", ""), row["nro_cliente"], nombre,
+                ["__reinicio__"], fh,
+            )
+            notify_scheduler()
+            _show_message(stdscr, f"✓ Reinicio programado para {fh.strftime('%d/%m/%Y %H:%M')}")
         return
 
     STALL_SECS = 30
@@ -2512,7 +2591,7 @@ def main(stdscr):
             needs_reload = False
 
         h, w   = stdscr.getmaxyx()
-        list_h = h - 5
+        list_h = h - 6
 
         if selected < offset:
             offset = selected
