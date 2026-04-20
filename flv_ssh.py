@@ -2196,6 +2196,48 @@ def draw_list(stdscr, rows, selected, offset, mode):
             pass
 
 
+# ── Lectura de teclas con soporte manual de secuencias de escape ───────────
+
+# Mapeo de secuencias de escape a KEY_Fx para terminales que no usan terminfo
+_ESC_SEQUENCES = {
+    # Linux console: \x1b[[A-E → F1-F5
+    (ord('['), ord('['), ord('A')): curses.KEY_F1,
+    (ord('['), ord('['), ord('B')): curses.KEY_F2,
+    (ord('['), ord('['), ord('C')): curses.KEY_F3,
+    (ord('['), ord('['), ord('D')): curses.KEY_F4,
+    (ord('['), ord('['), ord('E')): curses.KEY_F5,
+    # xterm/VT100: \x1bOP-OS → F1-F4
+    (ord('O'), ord('P')): curses.KEY_F1,
+    (ord('O'), ord('Q')): curses.KEY_F2,
+    (ord('O'), ord('R')): curses.KEY_F3,
+    (ord('O'), ord('S')): curses.KEY_F4,
+}
+
+def read_key(stdscr):
+    key = stdscr.getch()
+    if key != 27:
+        return key
+    # ESC recibido: leer hasta 3 chars más con timeout corto
+    stdscr.timeout(50)
+    seq = []
+    for _ in range(3):
+        ch = stdscr.getch()
+        if ch == -1:
+            break
+        seq.append(ch)
+    stdscr.timeout(100)
+    if not seq:
+        return 27  # ESC solo
+    mapped = _ESC_SEQUENCES.get(tuple(seq))
+    if mapped is not None:
+        return mapped
+    # secuencia de 2 chars también
+    mapped = _ESC_SEQUENCES.get(tuple(seq[:2]))
+    if mapped is not None:
+        return mapped
+    return 27  # secuencia desconocida → tratar como ESC
+
+
 # ── Loop principal ─────────────────────────────────────────────────────────
 
 def main(stdscr):
@@ -2287,7 +2329,7 @@ def main(stdscr):
         stdscr.refresh()
 
         try:
-            key = stdscr.getch()
+            key = read_key(stdscr)
         except curses.error:
             continue
 
