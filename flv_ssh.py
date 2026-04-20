@@ -13,10 +13,13 @@ import sys
 import time
 import threading
 import subprocess
+import smtplib
 import psycopg2
 import psycopg2.extras
 from collections import deque
 from datetime import datetime
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 
 APP_NAME    = "core-deploy"
 APP_VERSION = "1.0.1"
@@ -40,6 +43,39 @@ HADES = {
 }
 
 
+# ── Notificaciones por email ───────────────────────────────────────────────
+
+def send_notification(cfg, subject, body):
+    """Envía un email de notificación usando la config SMTP del usuario."""
+    host  = cfg.get("email_smtp_host", "")
+    port  = int(cfg.get("email_smtp_port", 587))
+    user  = cfg.get("email_smtp_user", "")
+    pwd   = cfg.get("email_smtp_pass", "")
+    frm   = cfg.get("email_from") or user
+    to    = cfg.get("email_to", "")
+
+    if not (host and user and to):
+        return  # email no configurado → no hacer nada
+
+    msg = MIMEMultipart()
+    msg["From"]    = frm
+    msg["To"]      = to
+    msg["Subject"] = subject
+    msg.attach(MIMEText(body, "plain", "utf-8"))
+
+    try:
+        with smtplib.SMTP(host, port, timeout=15) as srv:
+            srv.ehlo()
+            if cfg.get("email_tls", True):
+                srv.starttls()
+                srv.ehlo()
+            if pwd:
+                srv.login(user, pwd)
+            srv.sendmail(frm, to.split(","), msg.as_string())
+    except Exception:
+        pass  # notificaciones opcionales → error silencioso
+
+
 # ── Config por usuario ─────────────────────────────────────────────────────
 
 def load_user_config():
@@ -58,6 +94,69 @@ def save_user_config(cfg):
     with open(CONFIG_FILE, "w") as f:
         json.dump(cfg, f, indent=2)
     os.chmod(CONFIG_FILE, 0o600)
+
+
+def _wizard_email_config(stdscr, existing=None):
+    """Pantalla de configuración SMTP. Devuelve dict con claves email_* o {} si se omite."""
+    existing = existing or {}
+    fields = [
+        ("email_smtp_host", "Servidor SMTP (ej: smtp.gmail.com)",   existing.get("email_smtp_host", "")),
+        ("email_smtp_port", "Puerto SMTP (587=TLS, 465=SSL, 25)",   existing.get("email_smtp_port", "587")),
+        ("email_smtp_user", "Usuario / email remitente",             existing.get("email_smtp_user", "")),
+        ("email_smtp_pass", "Contraseña SMTP (app password)",        existing.get("email_smtp_pass", "")),
+        ("email_to",        "Destinatario(s) (separados por coma)", existing.get("email_to", "")),
+    ]
+    values  = {k: d for k, _, d in fields}
+    current = 0
+
+    while True:
+        stdscr.erase()
+        h, w = stdscr.getmaxyx()
+
+        stdscr.attron(curses.color_pair(C_HEADER) | curses.A_BOLD)
+        stdscr.addstr(0, 0, f" {APP_NAME.upper()} — Notificaciones por email ".ljust(w - 1))
+        stdscr.attroff(curses.color_pair(C_HEADER) | curses.A_BOLD)
+
+        stdscr.addstr(2, 4, "Config SMTP para notificaciones de deploy/reinicio (F10=Saltar):",
+                      curses.color_pair(C_WARN) | curses.A_BOLD)
+
+        for i, (key, label, _) in enumerate(fields):
+            y    = 4 + i * 3
+            attr = curses.color_pair(C_SELECTED) | curses.A_BOLD if i == current \
+                   else curses.color_pair(C_NORMAL)
+            stdscr.addstr(y,     4, f"  {label}:", curses.A_BOLD)
+            display = "***" if key == "email_smtp_pass" and values[key] else values[key]
+            try:
+                stdscr.addstr(y + 1, 4, f"  [{display:<60}]", attr)
+            except curses.error:
+                pass
+
+        stdscr.attron(curses.color_pair(C_STATUS))
+        stdscr.addstr(h - 1, 0,
+            " ↑↓=Navegar  Enter=Editar  F10=Guardar  ESC=Saltar sin guardar ".ljust(w - 1))
+        stdscr.attroff(curses.color_pair(C_STATUS))
+        stdscr.refresh()
+
+        key_pressed = stdscr.getch()
+
+        if key_pressed == 27:
+            return {}
+        elif key_pressed == curses.KEY_UP:
+            current = (current - 1) % len(fields)
+        elif key_pressed == curses.KEY_DOWN:
+            current = (current + 1) % len(fields)
+        elif key_pressed in (curses.KEY_ENTER, 10, 13):
+            fkey, flabel, _ = fields[current]
+            if fkey == "email_smtp_pass":
+                new_val = _ask_password_wizard(stdscr, f"{flabel}: ")
+            else:
+                new_val = ask_input(stdscr, f"{flabel}: ")
+            if new_val is not None:
+                values[fkey] = new_val
+        elif key_pressed == curses.KEY_F10:
+            if not values.get("email_smtp_host", "").strip():
+                return {}
+            return {k: v for k, v in values.items()}
 
 
 def setup_wizard(stdscr):
@@ -147,6 +246,9 @@ def setup_wizard(stdscr):
             if db_cfg is None:
                 return None
             values.update(db_cfg)
+            # Paso 4: email (opcional, se puede saltar con ESC)
+            email_cfg = _wizard_email_config(stdscr)
+            values.update(email_cfg)
             return values
 
 
@@ -793,6 +895,21 @@ def _run_scheduled_reinicio(deploy):
     detalle = "\n\n".join(logs)
     db_update_deploy_estado(deploy["id"], estado, detalle)
 
+    cfg = load_user_config() or {}
+    fh  = deploy.get("fecha_hora")
+    fh_str = fh.strftime("%d/%m/%Y %H:%M") if hasattr(fh, "strftime") else str(fh)[:16]
+    subject = f"[core-deploy] ✓ Reinicio — {deploy['desc_cliente']} ({fh_str})"
+    body = (
+        f"Reinicio de dominio completado{'(con cierre forzado)' if force else ''}.\n"
+        f"Cliente : {deploy['desc_cliente']}\n"
+        f"Servidor: {deploy.get('ip', '')}\n"
+        f"Path    : {deploy.get('path', '')}\n"
+        f"Hora    : {fh_str}\n\n"
+        f"{'='*60}\n\n"
+        f"{detalle}"
+    )
+    threading.Thread(target=send_notification, args=(cfg, subject, body), daemon=True).start()
+
 
 def _run_scheduled_deploy(deploy):
     """Ejecuta un deploy o reinicio programado en segundo plano (sin UI curses)."""
@@ -825,9 +942,27 @@ def _run_scheduled_deploy(deploy):
         ok, detalle = _deploy_one_silent(row, cbl, build_content, lambda m: None)
         resultados.append(f"{'✓' if ok else '✗'} {cbl}: {detalle}")
 
-    errores = sum(1 for r in resultados if r.startswith("✗"))
-    estado  = "error" if errores else "ok"
-    db_update_deploy_estado(deploy["id"], estado, "\n".join(resultados))
+    errores  = sum(1 for r in resultados if r.startswith("✗"))
+    estado   = "error" if errores else "ok"
+    detalle  = "\n".join(resultados)
+    db_update_deploy_estado(deploy["id"], estado, detalle)
+
+    cfg = load_user_config() or {}
+    fh  = deploy.get("fecha_hora")
+    fh_str  = fh.strftime("%d/%m/%Y %H:%M") if hasattr(fh, "strftime") else str(fh)[:16]
+    icono   = "✓" if estado == "ok" else "✗"
+    svcs_str = ", ".join(servicios)
+    subject = f"[core-deploy] {icono} Deploy — {deploy['desc_cliente']} — {svcs_str} ({fh_str})"
+    body = (
+        f"Deploy {'completado' if estado == 'ok' else 'con errores'}.\n"
+        f"Cliente  : {deploy['desc_cliente']}\n"
+        f"Servidor : {row['ip']}\n"
+        f"Servicios: {svcs_str}\n"
+        f"Hora     : {fh_str}\n\n"
+        f"{'='*60}\n\n"
+        f"{detalle}"
+    )
+    threading.Thread(target=send_notification, args=(cfg, subject, body), daemon=True).start()
 
 
 def _scheduler_loop():
@@ -2196,7 +2331,7 @@ def draw_footer(stdscr, msg="", mode=""):
             right = f"  {msg} " if msg else ""
             line  = left + right.rjust(w - 1 - len(left))
     else:
-        footer = " Enter=Acción  1-8=Tab  ESC=Borrar búsqueda  q=Salir "
+        footer = " Enter=Acción  1-8=Tab  ESC=Borrar búsqueda  e=Email  q=Salir "
         line   = f" {msg} " if msg else footer
 
     stdscr.attron(curses.color_pair(C_STATUS))
@@ -2869,6 +3004,15 @@ def main(stdscr):
                     status = "Solo se pueden eliminar deploys pendientes o con error"
                 stdscr.touchwin(); stdscr.refresh()
                 init_colors(); stdscr.keypad(True); stdscr.timeout(100)
+
+        # ── Configurar email ───────────────────────────────────────────────
+        elif key in (ord('e'), ord('E')):
+            email_cfg = _wizard_email_config(stdscr, existing=cfg)
+            if email_cfg:
+                cfg.update(email_cfg)
+                save_user_config(cfg)
+                status = "✓ Config de email guardada"
+            init_colors(); stdscr.keypad(True); stdscr.timeout(100)
 
         # ── Tipeo en búsqueda ──────────────────────────────────────────────
         elif 32 <= key <= 126 and mode != "programados":
