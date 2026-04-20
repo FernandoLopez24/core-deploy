@@ -2544,6 +2544,8 @@ def main(stdscr):
 def run():
     global _scheduler_running
 
+    os.environ.setdefault('ESCDELAY', '25')
+
     _scheduler_running = True
     t = threading.Thread(target=_scheduler_loop, daemon=True)
     t.start()
