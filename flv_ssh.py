@@ -26,6 +26,11 @@ APP_VERSION = "1.0.1"
 APP_CREDIT  = "by Fernando · Síntesis"
 CONFIG_FILE = os.path.expanduser("~/.config/core-deploy/config.json")
 
+# ── SMTP corporativo (fijo para todos) ────────────────────────────────────
+SMTP_HOST = "199.14.10.83"
+SMTP_PORT = 25
+SMTP_FROM = "no-reply@sintesis.com.bo"
+
 # ── Configuración de la BD (se rellena al cargar config) ──────────────────
 DB_CONFIG = {
     "host":     "",
@@ -46,32 +51,20 @@ HADES = {
 # ── Notificaciones por email ───────────────────────────────────────────────
 
 def send_notification(cfg, subject, body):
-    """Envía un email de notificación usando la config SMTP del usuario."""
-    host  = cfg.get("email_smtp_host", "")
-    port  = int(cfg.get("email_smtp_port", 587))
-    user  = cfg.get("email_smtp_user", "")
-    pwd   = cfg.get("email_smtp_pass", "")
-    frm   = cfg.get("email_from") or user
-    to    = cfg.get("email_to", "")
-
-    if not (host and user and to):
-        return  # email no configurado → no hacer nada
+    """Envía email usando el servidor SMTP corporativo. Solo requiere email_to en cfg."""
+    to = cfg.get("email_to", "").strip()
+    if not to:
+        return  # usuario sin email configurado → no hacer nada
 
     msg = MIMEMultipart()
-    msg["From"]    = frm
+    msg["From"]    = SMTP_FROM
     msg["To"]      = to
     msg["Subject"] = subject
     msg.attach(MIMEText(body, "plain", "utf-8"))
 
     try:
-        with smtplib.SMTP(host, port, timeout=15) as srv:
-            srv.ehlo()
-            if cfg.get("email_tls", True):
-                srv.starttls()
-                srv.ehlo()
-            if pwd:
-                srv.login(user, pwd)
-            srv.sendmail(frm, to.split(","), msg.as_string())
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15) as srv:
+            srv.sendmail(SMTP_FROM, to.split(","), msg.as_string())
     except Exception:
         pass  # notificaciones opcionales → error silencioso
 
@@ -97,17 +90,9 @@ def save_user_config(cfg):
 
 
 def _wizard_email_config(stdscr, existing=None):
-    """Pantalla de configuración SMTP. Devuelve dict con claves email_* o {} si se omite."""
-    existing = existing or {}
-    fields = [
-        ("email_smtp_host", "Servidor SMTP (ej: smtp.gmail.com)",   existing.get("email_smtp_host", "")),
-        ("email_smtp_port", "Puerto SMTP (587=TLS, 465=SSL, 25)",   existing.get("email_smtp_port", "587")),
-        ("email_smtp_user", "Usuario / email remitente",             existing.get("email_smtp_user", "")),
-        ("email_smtp_pass", "Contraseña SMTP (app password)",        existing.get("email_smtp_pass", "")),
-        ("email_to",        "Destinatario(s) (separados por coma)", existing.get("email_to", "")),
-    ]
-    values  = {k: d for k, _, d in fields}
-    current = 0
+    """Pide solo el email destino. El servidor SMTP es corporativo y está hardcodeado."""
+    existing   = existing or {}
+    current_to = existing.get("email_to", "")
 
     while True:
         stdscr.erase()
@@ -117,23 +102,23 @@ def _wizard_email_config(stdscr, existing=None):
         stdscr.addstr(0, 0, f" {APP_NAME.upper()} — Notificaciones por email ".ljust(w - 1))
         stdscr.attroff(curses.color_pair(C_HEADER) | curses.A_BOLD)
 
-        stdscr.addstr(2, 4, "Config SMTP para notificaciones de deploy/reinicio (F10=Saltar):",
-                      curses.color_pair(C_WARN) | curses.A_BOLD)
+        stdscr.addstr(2, 4, "Servidor SMTP corporativo (preconfigurado):", curses.A_BOLD)
+        stdscr.addstr(3, 6, f"Host : {SMTP_HOST}:{SMTP_PORT}", curses.color_pair(C_DIM))
+        stdscr.addstr(4, 6, f"From : {SMTP_FROM}",            curses.color_pair(C_DIM))
 
-        for i, (key, label, _) in enumerate(fields):
-            y    = 4 + i * 3
-            attr = curses.color_pair(C_SELECTED) | curses.A_BOLD if i == current \
-                   else curses.color_pair(C_NORMAL)
-            stdscr.addstr(y,     4, f"  {label}:", curses.A_BOLD)
-            display = "***" if key == "email_smtp_pass" and values[key] else values[key]
-            try:
-                stdscr.addstr(y + 1, 4, f"  [{display:<60}]", attr)
-            except curses.error:
-                pass
+        stdscr.addstr(6, 4, "Tu email de destino para notificaciones:", curses.A_BOLD)
+        attr = curses.color_pair(C_SELECTED) | curses.A_BOLD
+        try:
+            stdscr.addstr(7, 6, f"  [{current_to:<60}]", attr)
+        except curses.error:
+            pass
+
+        stdscr.addstr(9, 4, "Podés poner varios separados por coma.", curses.color_pair(C_DIM))
+        stdscr.addstr(10, 4, "Dejá vacío para no recibir notificaciones.", curses.color_pair(C_DIM))
 
         stdscr.attron(curses.color_pair(C_STATUS))
         stdscr.addstr(h - 1, 0,
-            " ↑↓=Navegar  Enter=Editar  F10=Guardar  ESC=Saltar sin guardar ".ljust(w - 1))
+            " Enter=Editar email  F10=Guardar  ESC=Cancelar ".ljust(w - 1))
         stdscr.attroff(curses.color_pair(C_STATUS))
         stdscr.refresh()
 
@@ -141,22 +126,12 @@ def _wizard_email_config(stdscr, existing=None):
 
         if key_pressed == 27:
             return {}
-        elif key_pressed == curses.KEY_UP:
-            current = (current - 1) % len(fields)
-        elif key_pressed == curses.KEY_DOWN:
-            current = (current + 1) % len(fields)
         elif key_pressed in (curses.KEY_ENTER, 10, 13):
-            fkey, flabel, _ = fields[current]
-            if fkey == "email_smtp_pass":
-                new_val = _ask_password_wizard(stdscr, f"{flabel}: ")
-            else:
-                new_val = ask_input(stdscr, f"{flabel}: ")
+            new_val = ask_input(stdscr, "Tu email de destino: ")
             if new_val is not None:
-                values[fkey] = new_val
+                current_to = new_val
         elif key_pressed == curses.KEY_F10:
-            if not values.get("email_smtp_host", "").strip():
-                return {}
-            return {k: v for k, v in values.items()}
+            return {"email_to": current_to}
 
 
 def setup_wizard(stdscr):
