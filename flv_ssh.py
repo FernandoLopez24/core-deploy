@@ -860,12 +860,17 @@ def _run_scheduled_reinicio(deploy):
     logs = []
     force, out = run_cmd("tmshutdown -y")
     logs.append(f"tmshutdown:\n{out.strip()}")
-    if force:
+    shutdown_failed = (
+        "Shutdown failed" in out
+        or "Cannot shutdown BBL" in out
+    )
+    if force or shutdown_failed:
         _, out2 = run_cmd("tmipcrm -y")
         logs.append(f"tmipcrm:\n{out2.strip()}")
     _, out3 = run_cmd("tmboot -y")
     logs.append(f"tmboot:\n{out3.strip()}")
 
+    needs_ipc = force or shutdown_failed
     estado = "ok"
     detalle = "\n\n".join(logs)
     db_update_deploy_estado(deploy["id"], estado, detalle)
@@ -875,7 +880,7 @@ def _run_scheduled_reinicio(deploy):
     fh_str = fh.strftime("%d/%m/%Y %H:%M") if hasattr(fh, "strftime") else str(fh)[:16]
     subject = f"[core-deploy] ✓ Reinicio — {deploy['desc_cliente']} ({fh_str})"
     body = (
-        f"Reinicio de dominio completado{'(con cierre forzado)' if force else ''}.\n"
+        f"Reinicio de dominio completado{'(con cierre forzado/limpieza IPC)' if needs_ipc else ''}.\n"
         f"Cliente : {deploy['desc_cliente']}\n"
         f"Servidor: {deploy.get('ip', '')}\n"
         f"Path    : {deploy.get('path', '')}\n"
@@ -2427,7 +2432,7 @@ def read_key(stdscr):
 
 # ── Reinicio de dominio Tuxedo ─────────────────────────────────────────────
 
-def reinicio_tuxedo(stdscr, row):
+def reinicio_tuxedo(stdscr, row, usuario=""):
     """Reinicia el dominio Tuxedo: tmshutdown -y → opcional tmipcrm -y → tmboot -y."""
     ip       = row["ip"]
     user     = row["ssh_user"]
@@ -2448,7 +2453,7 @@ def reinicio_tuxedo(stdscr, row):
         fh = ask_datetime(stdscr)
         if fh:
             db_insert_deploy_programado(
-                row.get("ssh_user", ""), row["nro_cliente"], nombre,
+                usuario, row["nro_cliente"], nombre,
                 ["__reinicio__"], fh,
             )
             notify_scheduler()
@@ -2593,12 +2598,22 @@ def reinicio_tuxedo(stdscr, row):
         return force_used
 
     # ── Fase 1: Bajada ────────────────────────────────────────────────────────
+    snap_before = len(lines)
     force = run_phase("tmshutdown -y", "BAJADA", stall_timeout=STALL_SECS)
 
-    # ── Fase 2: Limpieza IPC si hubo cierre forzado ───────────────────────────
-    if not cancelled[0] and force:
+    shutdown_output = " ".join(list(lines)[snap_before:])
+    shutdown_failed = (
+        "Shutdown failed" in shutdown_output
+        or "Cannot shutdown BBL" in shutdown_output
+    )
+
+    # ── Fase 2: Limpieza IPC si hubo cierre forzado o bajada incompleta ───────
+    if not cancelled[0] and (force or shutdown_failed):
         lines.append("")
-        lines.append("  [!] Bajada forzada → ejecutando tmipcrm para limpiar IPC...")
+        if shutdown_failed:
+            lines.append("  [!] BBL no bajó (Shutdown failed) → ejecutando tmipcrm para limpiar IPC...")
+        else:
+            lines.append("  [!] Bajada forzada → ejecutando tmipcrm para limpiar IPC...")
         run_phase("tmipcrm -y", "LIMPIEZA IPC")
 
     # ── Fase 3: Subida ────────────────────────────────────────────────────────
@@ -2887,7 +2902,7 @@ def main(stdscr):
                 if not row.get("path"):
                     status = f"Sin path para {row['desc_cliente']}"
                     continue
-                reinicio_tuxedo(stdscr, row)
+                reinicio_tuxedo(stdscr, row, usuario)
                 init_colors(); stdscr.keypad(True); stdscr.timeout(100)
                 needs_reload = True
 
