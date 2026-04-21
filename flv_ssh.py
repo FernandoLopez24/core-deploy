@@ -852,6 +852,12 @@ def _run_scheduled_reinicio(deploy):
                 last_out = time.time()
             time.sleep(0.1)
         try:
+            rest = proc.stdout.read()
+            if rest:
+                out.append(rest.decode("utf-8", errors="replace"))
+        except Exception:
+            pass
+        try:
             proc.kill()
         except Exception:
             pass
