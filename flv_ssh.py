@@ -751,7 +751,7 @@ def fetch_maquinas(search=""):
     query = """
         SELECT
             nombre,
-            host(ip)        AS ip,
+            split_part(ip::text, '/', 1) AS ip,
             ssh_user,
             COALESCE(ssh_password, '') AS ssh_password,
             ssh_port,
