@@ -504,6 +504,98 @@ def db_delete_cliente(nro):
         conn.close()
 
 
+def _servidor_picker(stdscr):
+    """
+    Muestra un picker de servidores de la tabla maquinas.
+    Devuelve dict {"nombre": ..., "ip": ...} o None si cancela.
+    """
+    try:
+        maquinas = fetch_maquinas()
+    except Exception as e:
+        _show_message(stdscr, f"Error cargando servidores: {e}", error=True)
+        return None
+
+    if not maquinas:
+        _show_message(stdscr, "No hay servidores registrados en la BD.", error=True)
+        return None
+
+    search    = ""
+    selected  = 0
+
+    while True:
+        filtradas = [m for m in maquinas
+                     if search.lower() in m["nombre"].lower()
+                     or search.lower() in (m["ip"] or "")]
+
+        h, w = stdscr.getmaxyx()
+        stdscr.erase()
+
+        stdscr.attron(curses.color_pair(C_HEADER) | curses.A_BOLD)
+        stdscr.addstr(0, 0, " SELECCIONAR SERVIDOR ".ljust(w - 1))
+        stdscr.attroff(curses.color_pair(C_HEADER) | curses.A_BOLD)
+
+        # Barra de búsqueda
+        stdscr.attron(curses.A_BOLD)
+        stdscr.addstr(1, 2, "Buscar: ")
+        stdscr.attroff(curses.A_BOLD)
+        try:
+            stdscr.addstr(1, 10, search[:w - 12])
+        except curses.error:
+            pass
+
+        list_h = h - 4
+        selected = max(0, min(selected, len(filtradas) - 1))
+        offset   = max(0, selected - list_h + 1)
+
+        if not filtradas:
+            try:
+                stdscr.addstr(3, 4, "Sin resultados.", curses.color_pair(C_DIM))
+            except curses.error:
+                pass
+        else:
+            for i, m in enumerate(filtradas[offset:offset + list_h]):
+                idx  = i + offset
+                y    = 3 + i
+                line = f"  {m['nombre']:<25}  {m['ip'] or '':<18}"
+                if idx == selected:
+                    stdscr.attron(curses.color_pair(C_SELECTED) | curses.A_BOLD)
+                    try:
+                        stdscr.addstr(y, 0, line[:w - 1].ljust(w - 1))
+                    except curses.error:
+                        pass
+                    stdscr.attroff(curses.color_pair(C_SELECTED) | curses.A_BOLD)
+                else:
+                    try:
+                        stdscr.addstr(y, 0, line[:w - 1])
+                    except curses.error:
+                        pass
+
+        stdscr.attron(curses.color_pair(C_STATUS))
+        stdscr.addstr(h - 1, 0,
+            " ↑↓=Navegar  Escribir=Filtrar  Enter=Seleccionar  ESC=Cancelar ".ljust(w - 1))
+        stdscr.attroff(curses.color_pair(C_STATUS))
+        stdscr.refresh()
+
+        k = stdscr.getch()
+
+        if k == 27:
+            return None
+        elif k == curses.KEY_UP:
+            selected = max(0, selected - 1)
+        elif k == curses.KEY_DOWN:
+            selected = min(len(filtradas) - 1, selected + 1)
+        elif k in (curses.KEY_ENTER, 10, 13):
+            if filtradas:
+                m = filtradas[selected]
+                return {"nombre": m["nombre"], "ip": m["ip"] or ""}
+        elif k in (curses.KEY_BACKSPACE, 127, 8):
+            search = search[:-1]
+            selected = 0
+        elif 32 <= k <= 126:
+            search += chr(k)
+            selected = 0
+
+
 def cliente_form(stdscr, row=None):
     """
     Formulario para crear o editar un cliente.
@@ -560,9 +652,13 @@ def cliente_form(stdscr, row=None):
             stdscr.addstr(h - 3, 2, f" ✗ {error} ")
             stdscr.attroff(curses.color_pair(C_ERROR) | curses.A_BOLD)
 
+        fkey_cur = editable_fields[current][0] if editable_fields else ""
+        if fkey_cur in ("servidor", "ip_servidor"):
+            footer_hint = " ↑↓=Navegar  Enter=Elegir servidor  F10=Guardar  ESC=Cancelar "
+        else:
+            footer_hint = " ↑↓=Navegar  Enter=Editar campo  F10=Guardar  ESC=Cancelar "
         stdscr.attron(curses.color_pair(C_STATUS))
-        stdscr.addstr(h - 1, 0,
-            " ↑↓=Navegar  Enter=Editar campo  F10=Guardar  ESC=Cancelar ".ljust(w - 1))
+        stdscr.addstr(h - 1, 0, footer_hint.ljust(w - 1))
         stdscr.attroff(curses.color_pair(C_STATUS))
         stdscr.refresh()
 
@@ -577,9 +673,15 @@ def cliente_form(stdscr, row=None):
             current = (current + 1) % len(editable_fields)
         elif key_pressed in (curses.KEY_ENTER, 10, 13):
             fkey, flabel, _, _ = editable_fields[current]
-            nueva = ask_input(stdscr, f"{flabel}: ")
-            if nueva or fkey not in ("nro_cliente", "desc_cliente"):
-                values[fkey] = nueva
+            if fkey in ("servidor", "ip_servidor"):
+                sel = _servidor_picker(stdscr)
+                if sel:
+                    values["servidor"]    = sel["nombre"]
+                    values["ip_servidor"] = sel["ip"]
+            else:
+                nueva = ask_input(stdscr, f"{flabel}: ")
+                if nueva or fkey not in ("nro_cliente", "desc_cliente"):
+                    values[fkey] = nueva
         elif key_pressed == curses.KEY_F10:
             # Validar
             if not values["nro_cliente"].strip():
