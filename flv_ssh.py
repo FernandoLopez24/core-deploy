@@ -414,6 +414,7 @@ def fetch_clientes(search=""):
             c.desc_cobol,
             c.path,
             c.path_hades,
+            c.hades_user,
             COALESCE(m.ssh_user,     'tuxedo') AS ssh_user,
             COALESCE(m.ssh_password, '')        AS ssh_password,
             COALESCE(m.ssh_port,     22)        AS ssh_port
@@ -447,6 +448,7 @@ CLIENTE_FIELDS = [
     ("desc_cobol",   "Desc COBOL",        "str",  True),
     ("path",         "Path Producción",   "str",  True),
     ("path_hades",   "Path Hades",        "str",  True),
+    ("hades_user",   "Usuario Hades (opt)","str",  True),
 ]
 
 
@@ -457,12 +459,13 @@ def db_insert_cliente(data):
             cur.execute("""
                 INSERT INTO clientes
                     (nro_cliente, desc_cliente, servidor, ip_servidor,
-                     iniciales, desc_cobol, path, path_hades)
-                VALUES (%s,%s,%s,%s::inet,%s,%s,%s,%s)
+                     iniciales, desc_cobol, path, path_hades, hades_user)
+                VALUES (%s,%s,%s,%s::inet,%s,%s,%s,%s,%s)
             """, (
                 data["nro_cliente"], data["desc_cliente"], data["servidor"],
                 data["ip_servidor"], data["iniciales"], data["desc_cobol"],
                 data["path"], data["path_hades"],
+                data.get("hades_user") or None,
             ))
         conn.commit()
     finally:
@@ -476,12 +479,15 @@ def db_update_cliente(nro, data):
             cur.execute("""
                 UPDATE clientes SET
                     desc_cliente=%s, servidor=%s, ip_servidor=%s::inet,
-                    iniciales=%s, desc_cobol=%s, path=%s, path_hades=%s
+                    iniciales=%s, desc_cobol=%s, path=%s, path_hades=%s,
+                    hades_user=%s
                 WHERE nro_cliente=%s
             """, (
                 data["desc_cliente"], data["servidor"], data["ip_servidor"],
                 data["iniciales"], data["desc_cobol"], data["path"],
-                data["path_hades"], nro,
+                data["path_hades"],
+                data.get("hades_user") or None,
+                nro,
             ))
         conn.commit()
     finally:
@@ -514,6 +520,7 @@ def cliente_form(stdscr, row=None):
         "desc_cobol":   row.get("desc_cobol")   or "" if row else "",
         "path":         row.get("path")         or "" if row else "",
         "path_hades":   row.get("path_hades")   or "" if row else "",
+        "hades_user":   row.get("hades_user")   or "" if row else "",
     }
     current  = 0
     error    = ""
@@ -608,6 +615,7 @@ def show_detail(stdscr, row):
             ("Desc COBOL",       row.get("desc_cobol", "") or "—"),
             ("Path Producción",  row.get("path", "") or "—"),
             ("Path Hades",       row.get("path_hades", "") or "—"),
+            ("Usuario Hades",    row.get("hades_user") or f"(global: {HADES['user']})"),
             ("SSH Usuario",      row.get("ssh_user", "")),
             ("SSH Puerto",       str(row.get("ssh_port", ""))),
         ]
@@ -671,6 +679,20 @@ def fetch_maquinas(search=""):
 
 
 # ── Deploys programados — BD ──────────────────────────────────────────────
+
+def ensure_schema():
+    """Aplica migraciones de esquema no destructivas (ADD COLUMN IF NOT EXISTS)."""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                ALTER TABLE clientes
+                    ADD COLUMN IF NOT EXISTS hades_user TEXT
+            """)
+        conn.commit()
+    finally:
+        conn.close()
+
 
 def ensure_deploys_table():
     """Crea la tabla deploys_programados si no existe."""
@@ -743,6 +765,7 @@ def db_fetch_deploys_pendientes():
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             cur.execute("""
                 SELECT d.*, c.ip_servidor::text AS ip, c.path, c.path_hades,
+                       c.hades_user,
                        COALESCE(m.ssh_user, 'tuxedo') AS ssh_user,
                        COALESCE(m.ssh_password, '')   AS ssh_password,
                        COALESCE(m.ssh_port, 22)       AS ssh_port
@@ -911,6 +934,7 @@ def _run_scheduled_deploy(deploy):
         "ssh_port":     deploy["ssh_port"],
         "path":         deploy["path"],
         "path_hades":   deploy["path_hades"],
+        "hades_user":   deploy.get("hades_user") or "",
         "desc_cliente": deploy["desc_cliente"],
     }
 
@@ -1012,35 +1036,42 @@ def ssh_cmd_base(ip, user, port):
     ]
 
 
-def hades_scp_cmd(remote_path, local_path):
+def hades_scp_cmd(remote_path, local_path, user=None):
     """Construye el comando scp desde hades según el método de auth."""
+    user = user or HADES["user"]
     common = [
         "-o", "StrictHostKeyChecking=no",
         "-o", "UserKnownHostsFile=/dev/null",
         "-o", "LogLevel=QUIET",
         "-P", str(HADES["port"]),
     ]
-    src = f"{HADES['user']}@{HADES['host']}:{remote_path}"
+    src = f"{user}@{HADES['host']}:{remote_path}"
     if HADES.get("auth") == "password":
         return ["sshpass", "-e", "scp"] + common + [src, local_path]
     else:
         return ["scp", "-i", HADES["key"]] + common + [src, local_path]
 
 
-def hades_cmd_base():
+def hades_cmd_base(user=None):
     """Construye el comando SSH base para hades según el método de auth configurado."""
+    user = user or HADES["user"]
     common = [
         "-o", "StrictHostKeyChecking=no",
         "-o", "UserKnownHostsFile=/dev/null",
         "-o", "LogLevel=QUIET",
         "-p", str(HADES["port"]),
     ]
-    target = f"{HADES['user']}@{HADES['host']}"
+    target = f"{user}@{HADES['host']}"
 
     if HADES.get("auth") == "password":
         return ["sshpass", "-e", "ssh"] + common + [target]
     else:
         return ["ssh", "-i", HADES["key"]] + common + [target]
+
+
+def _hades_user_for(row):
+    """Devuelve el usuario de hades para este cliente: per-cliente si está definido, o el global."""
+    return (row.get("hades_user") or "").strip() or HADES["user"]
 
 
 def ssh_connect(ip, user, password, port=22, remote_path=None):
@@ -1207,18 +1238,19 @@ def stream_viewer(stdscr, row, grep_pattern=None):
 
 # ── Deploy COBOL ───────────────────────────────────────────────────────────
 
-def hades_run(remote_cmd, timeout=60):
+def hades_run(remote_cmd, timeout=60, user=None):
     """Ejecuta un comando en hades y devuelve (stdout, stderr, returncode)."""
-    cmd = hades_cmd_base() + [remote_cmd]
+    cmd = hades_cmd_base(user) + [remote_cmd]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
                             env=_sshenv(HADES.get("password", "")))
     return result.stdout, result.stderr, result.returncode
 
 
-def list_cbl_files(path_hades):
+def list_cbl_files(path_hades, user=None):
     """Lista archivos .cbl en path_hades (hades). Devuelve lista ordenada."""
     stdout, _, _ = hades_run(
-        f'ls "{path_hades}"/*.cbl "{path_hades}"/*.CBL 2>/dev/null | xargs -I{{}} basename {{}}'
+        f'ls "{path_hades}"/*.cbl "{path_hades}"/*.CBL 2>/dev/null | xargs -I{{}} basename {{}}',
+        user=user,
     )
     files = sorted(set(f.strip() for f in stdout.splitlines() if f.strip()))
     return files
@@ -1242,7 +1274,7 @@ def cbl_picker(stdscr, row):
     stdscr.refresh()
 
     try:
-        files = list_cbl_files(path_hades)
+        files = list_cbl_files(path_hades, user=_hades_user_for(row))
     except Exception as e:
         files = []
         _show_message(stdscr, f"Error conectando a hades: {e}", error=True)
@@ -1479,8 +1511,9 @@ def run_deploy(stdscr, row, cbl_file):
         stdscr.attroff(curses.color_pair(C_STATUS))
         stdscr.refresh()
 
-    ssh_env  = _sshenv(password)
+    ssh_env   = _sshenv(password)
     hades_env = _sshenv(HADES.get("password", ""))
+    h_user    = _hades_user_for(row)
 
     def run_step(idx, cmd, timeout=120, env=None):
         steps[idx][0] = "run"
@@ -1501,13 +1534,13 @@ def run_deploy(stdscr, row, cbl_file):
     error = False
 
     # ── Paso 1: Compilar en hades ──────────────────────────────────────────
-    cmd1 = hades_cmd_base() + [f'cd "{path_hades}" && cob {cbl_file}']
+    cmd1 = hades_cmd_base(h_user) + [f'cd "{path_hades}" && cob {cbl_file}']
     if not run_step(0, cmd1, timeout=120, env=hades_env):
         error = True
 
     # ── Paso 2: Descargar .int de hades ───────────────────────────────────
     if not error:
-        cmd2 = hades_scp_cmd(f"{path_hades}/{int_file}", local_tmp)
+        cmd2 = hades_scp_cmd(f"{path_hades}/{int_file}", local_tmp, h_user)
         if not run_step(1, cmd2, timeout=60, env=hades_env):
             error = True
 
@@ -1724,6 +1757,7 @@ def _deploy_one_silent(row, cbl_file, build_content, log_cb):
 
     ssh_env   = _sshenv(password)
     hades_env = _sshenv(HADES.get("password", ""))
+    h_user    = _hades_user_for(row)
 
     def run(cmd, timeout=120, env=None):
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
@@ -1731,13 +1765,13 @@ def _deploy_one_silent(row, cbl_file, build_content, log_cb):
 
     # 1. Compilar en hades
     log_cb(f"  [1/5] cob {cbl_file}")
-    ok, out = run(hades_cmd_base() + [f'cd "{path_hades}" && cob {cbl_file}'], env=hades_env)
+    ok, out = run(hades_cmd_base(h_user) + [f'cd "{path_hades}" && cob {cbl_file}'], env=hades_env)
     if not ok:
         return False, f"Error compilando: {out[-200:]}"
 
     # 2. Descargar .int
     log_cb(f"  [2/5] scp {int_file} ← hades")
-    ok, out = run(hades_scp_cmd(f"{path_hades}/{int_file}", local_tmp), timeout=60, env=hades_env)
+    ok, out = run(hades_scp_cmd(f"{path_hades}/{int_file}", local_tmp, h_user), timeout=60, env=hades_env)
     if not ok:
         return False, f"Error descargando .int: {out[-200:]}"
 
@@ -2694,6 +2728,7 @@ def main(stdscr):
         print(f"  rm ~/.config/core-deploy/config.json && core-deploy\n")
         sys.exit(1)
 
+    ensure_schema()
     ensure_deploys_table()
 
     usuario = HADES["user"]
