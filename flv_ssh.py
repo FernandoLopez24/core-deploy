@@ -1484,7 +1484,7 @@ def find_build_target(build_server_content, int_file):
     current_compila = None
     target_num = None
     for line in lines:
-        m = re.match(r'^(compila\d+)\s*:', line, re.IGNORECASE)
+        m = re.match(r'^(compila?\d+)\s*:', line, re.IGNORECASE)
         if m:
             current_compila = m.group(1)
         if current_compila and int_file in line:
