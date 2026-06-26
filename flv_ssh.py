@@ -3498,8 +3498,84 @@ def read_key(stdscr):
 
 # ── Reinicio de dominio Tuxedo ─────────────────────────────────────────────
 
-def reinicio_tuxedo(stdscr, row, usuario=""):
-    """Reinicia el dominio Tuxedo: tmshutdown -y → opcional tmipcrm -y → tmboot -y."""
+def _reinicio_options_dialog(stdscr, row):
+    """
+    Pantalla de opciones para el reinicio: cargar DM y/o UBB.
+    Retorna (ubb_name: str|None, dm_name: str|None).
+    """
+    iniciales = row.get("iniciales", "").strip()
+    dm_def  = f"DM{iniciales}"  if iniciales else "DM"
+    ubb_def = f"UBB{iniciales}" if iniciales else "UBB"
+
+    opt_ubb = False;  ubb_name = ubb_def
+    opt_dm  = False;  dm_name  = dm_def
+    cursor  = 0        # 0=UBB, 1=DM
+    nombre  = row.get("desc_cliente", "")
+
+    while True:
+        h, w = stdscr.getmaxyx()
+        stdscr.erase()
+
+        stdscr.attron(curses.color_pair(C_HEADER) | curses.A_BOLD)
+        try:
+            stdscr.addstr(0, 0, f" OPCIONES DE REINICIO — {nombre} "[:w-1].ljust(w-1))
+        except curses.error:
+            pass
+        stdscr.attroff(curses.color_pair(C_HEADER) | curses.A_BOLD)
+
+        row_y = 2
+        opts = [("ubb", opt_ubb, ubb_name), ("dm", opt_dm, dm_name)]
+        labels = {
+            "ubb": ("Cargar UBB  (tmloadcf -y ", ubb_name, ")"),
+            "dm":  ("Cargar DM   (dmloadcf -y ", dm_name,  ")"),
+        }
+        for i, (key, checked, name) in enumerate(opts):
+            mark = "[x]" if checked else "[ ]"
+            lbl_pre, lbl_name, lbl_suf = labels[key]
+            label = f"{lbl_pre}{lbl_name}{lbl_suf}"
+            attr  = (curses.color_pair(C_SELECTED) | curses.A_BOLD) if cursor == i \
+                    else curses.color_pair(C_NORMAL)
+            try:
+                stdscr.addstr(row_y, 2, f"  {mark} {label}"[:w-3], attr)
+            except curses.error:
+                pass
+            row_y += 1
+
+        stdscr.attron(curses.color_pair(C_STATUS))
+        try:
+            stdscr.addstr(h-1, 0,
+                " ↑↓=Navegar  Espacio=marcar  Enter=Continuar  ESC=Cancelar "[:w-1].ljust(w-1))
+        except curses.error:
+            pass
+        stdscr.attroff(curses.color_pair(C_STATUS))
+        stdscr.refresh()
+
+        k = stdscr.getch()
+        if k == 27:
+            return True, None, None   # (cancelled, ubb, dm)
+        elif k == curses.KEY_UP:
+            cursor = (cursor - 1) % 2
+        elif k == curses.KEY_DOWN:
+            cursor = (cursor + 1) % 2
+        elif k == ord(' '):
+            if cursor == 0:
+                opt_ubb = not opt_ubb
+                if opt_ubb:
+                    inp = (ask_input(stdscr, f"Nombre UBB [{ubb_def}]: ") or "").strip()
+                    ubb_name = inp if inp else ubb_def
+                    labels["ubb"] = ("Cargar UBB  (tmloadcf -y ", ubb_name, ")")
+            else:
+                opt_dm = not opt_dm
+                if opt_dm:
+                    inp = (ask_input(stdscr, f"Nombre DM [{dm_def}]: ") or "").strip()
+                    dm_name = inp if inp else dm_def
+                    labels["dm"] = ("Cargar DM   (dmloadcf -y ", dm_name, ")")
+        elif k in (curses.KEY_ENTER, 10, 13):
+            return False, (ubb_name if opt_ubb else None), (dm_name if opt_dm else None)
+
+
+def reinicio_tuxedo(stdscr, row, usuario="", ubb_name=None, dm_name=None):
+    """Reinicia el dominio Tuxedo: tmshutdown → [tmloadcf] → [dmloadcf] → tmboot."""
     ip       = row["ip"]
     user     = row["ssh_user"]
     password = row["ssh_password"]
@@ -3682,7 +3758,15 @@ def reinicio_tuxedo(stdscr, row, usuario=""):
             lines.append("  [!] Bajada forzada → ejecutando tmipcrm para limpiar IPC...")
         run_phase("tmipcrm -y", "LIMPIEZA IPC")
 
-    # ── Fase 3: Subida ────────────────────────────────────────────────────────
+    # ── Fase 3: Carga UBB (opcional) ─────────────────────────────────────────
+    if not cancelled[0] and ubb_name:
+        run_phase(f"tmloadcf -y {ubb_name}", f"CARGA UBB ({ubb_name})")
+
+    # ── Fase 4: Carga DM (opcional) ──────────────────────────────────────────
+    if not cancelled[0] and dm_name:
+        run_phase(f"dmloadcf -y {dm_name}", f"CARGA DM ({dm_name})")
+
+    # ── Fase 5: Subida ────────────────────────────────────────────────────────
     if not cancelled[0]:
         run_phase("tmboot -y", "SUBIDA")
 
@@ -4906,7 +4990,11 @@ def cobol_main(stdscr, usuario):
                 if not row.get("path"):
                     status = f"Sin path para {row['desc_cliente']}"
                     continue
-                reinicio_tuxedo(stdscr, row, usuario)
+                _cancelled, _ubb, _dm = _reinicio_options_dialog(stdscr, row)
+                init_colors(); stdscr.keypad(True)
+                if not _cancelled:
+                    reinicio_tuxedo(stdscr, row, usuario,
+                                    ubb_name=_ubb, dm_name=_dm)
                 init_colors(); stdscr.keypad(True); stdscr.timeout(100)
                 needs_reload = True
 
