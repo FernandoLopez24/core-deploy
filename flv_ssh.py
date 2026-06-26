@@ -2001,29 +2001,45 @@ def run_deploy(stdscr, row, cbl_file):
 
     # ── Detectar vistas COPY LIBAXS ───────────────────────────────────────
     libpath = row.get("libpath", "").strip()
+    views   = []
     if libpath:
+        # Mostrar estado brevemente
+        h2, w2 = stdscr.getmaxyx()
+        stdscr.attron(curses.color_pair(C_STATUS))
         try:
+            stdscr.addstr(h2 - 1, 0,
+                          f" Verificando vistas en {cbl_file}... "[:w2-1].ljust(w2-1))
+        except curses.error:
+            pass
+        stdscr.attroff(curses.color_pair(C_STATUS))
+        stdscr.refresh()
+
+        try:
+            # Buscar LIBAXS en el archivo (cualquier línea que lo mencione)
+            clean_path = path_hades.rstrip("/")
             grep_r = subprocess.run(
-                hades_cmd_base() + [f'grep -i "COPY.*LIBAXS" "{path_hades}/{cbl_file}" 2>/dev/null'],
-                capture_output=True, text=True, timeout=10, env=hades_env,
+                hades_cmd_base() + [
+                    f'grep -i "LIBAXS" "{clean_path}/{cbl_file}" 2>/dev/null || true'
+                ],
+                capture_output=True, text=True, timeout=15, env=hades_env,
             )
-            views = detect_copy_views(grep_r.stdout, path_hades)
-        except Exception:
+            views = detect_copy_views(grep_r.stdout, clean_path)
+        except Exception as _ve:
             views = []
 
-        if views:
-            view_names = ", ".join(b + ".V" for b, _ in views)
-            if confirm_dialog(stdscr, f"Vistas detectadas: {view_names}  ¿Llevar también?"):
-                all_maquinas = fetch_maquinas(sistema="cobol")
-                selected_maqs = multiselect_maquinas_dialog(
-                    stdscr, all_maquinas,
-                    title=f"Servidores destino para: {view_names}",
-                )
-                init_colors(); stdscr.keypad(True)
-                if selected_maqs:
-                    deploy_view_files(stdscr, views, path_hades, libpath,
-                                      selected_maqs, hades_env)
+    if views:
+        view_names = ", ".join(b + ".V" for b, _ in views)
+        if confirm_dialog(stdscr, f"Vistas: {view_names}  ¿Llevar también?"):
+            all_maquinas = fetch_maquinas(sistema="cobol")
+            selected_maqs = multiselect_maquinas_dialog(
+                stdscr, all_maquinas,
+                title=f"Servidores destino para: {view_names}",
+            )
             init_colors(); stdscr.keypad(True)
+            if selected_maqs:
+                deploy_view_files(stdscr, views, path_hades, libpath,
+                                  selected_maqs, hades_env)
+        init_colors(); stdscr.keypad(True)
 
     def run_step(idx, cmd, timeout=120, env=None):
         steps[idx][0] = "run"
