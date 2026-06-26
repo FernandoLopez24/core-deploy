@@ -535,16 +535,16 @@ MAQUINA_FIELDS = [
 ]
 
 
-def db_insert_maquina(data):
+def db_insert_maquina(data, sistema="cobol"):
     conn = get_connection()
     try:
         with conn.cursor() as cur:
             cur.execute("""
-                INSERT INTO maquinas (nombre, ip, ssh_user, ssh_password, ssh_port, descripcion)
-                VALUES (%s, %s::inet, %s, %s, %s, %s)
+                INSERT INTO maquinas (nombre, ip, ssh_user, ssh_password, ssh_port, descripcion, sistema)
+                VALUES (%s, %s::inet, %s, %s, %s, %s, %s)
             """, (
                 data["nombre"], data["ip"], data["ssh_user"],
-                data["ssh_password"], int(data["ssh_port"] or 22), data["descripcion"],
+                data["ssh_password"], int(data["ssh_port"] or 22), data["descripcion"], sistema,
             ))
         conn.commit()
     finally:
@@ -666,7 +666,7 @@ def _servidor_picker(stdscr):
     Devuelve dict {"nombre": ..., "ip": ...} o None si cancela.
     """
     try:
-        maquinas = fetch_maquinas()
+        maquinas = fetch_maquinas(sistema="cobol")
     except Exception as e:
         _show_message(stdscr, f"Error cargando servidores: {e}", error=True)
         return None
@@ -908,7 +908,7 @@ def confirm_dialog(stdscr, msg):
             del win; return False
 
 
-def fetch_maquinas(search=""):
+def fetch_maquinas(search="", sistema="cobol"):
     query = """
         SELECT
             nombre,
@@ -919,16 +919,18 @@ def fetch_maquinas(search=""):
             COALESCE(descripcion, '') AS descripcion
         FROM maquinas
         WHERE
-            nombre      ILIKE %s OR
-            ip::text    ILIKE %s OR
-            descripcion ILIKE %s
+            COALESCE(sistema, 'cobol') = %s AND (
+                nombre      ILIKE %s OR
+                ip::text    ILIKE %s OR
+                descripcion ILIKE %s
+            )
         ORDER BY nombre
     """
     pat = f"%{search}%"
     conn = get_connection()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            cur.execute(query, (pat, pat, pat))
+            cur.execute(query, (sistema, pat, pat, pat))
             return [dict(r) for r in cur.fetchall()]
     finally:
         conn.close()
@@ -941,9 +943,10 @@ def ensure_schema():
     conn = get_connection()
     try:
         with conn.cursor() as cur:
+            cur.execute("ALTER TABLE clientes DROP COLUMN IF EXISTS hades_user")
             cur.execute("""
-                ALTER TABLE clientes
-                    DROP COLUMN IF EXISTS hades_user
+                ALTER TABLE maquinas
+                    ADD COLUMN IF NOT EXISTS sistema VARCHAR(50) DEFAULT 'cobol'
             """)
         conn.commit()
     finally:
@@ -3067,21 +3070,155 @@ def _draw_main_menu(stdscr, selected):
 
 
 def genesis_main(stdscr):
-    h, w = stdscr.getmaxyx()
+    search       = ""
+    searching    = False
+    selected     = 0
+    offset       = 0
+    status       = ""
+    rows         = []
+    needs_reload = True
+
     while True:
+        if needs_reload:
+            try:
+                rows = fetch_maquinas(search, sistema="genesis")
+                selected = min(selected, max(0, len(rows) - 1))
+            except Exception as e:
+                status = f"ERROR BD: {e}"
+                rows = []
+            needs_reload = False
+
+        h, w   = stdscr.getmaxyx()
+        list_h = h - 6
+
+        if selected < offset:
+            offset = selected
+        elif selected >= offset + list_h:
+            offset = selected - list_h + 1
+
         stdscr.erase()
+
+        # Header
+        title = f" {APP_NAME.upper()} · GENESIS "
         stdscr.attron(curses.color_pair(C_HEADER) | curses.A_BOLD)
-        stdscr.addstr(0, 0, " GENESIS ".ljust(w - 1))
+        stdscr.addstr(0, 0, " " * (w - 1))
+        stdscr.addstr(0, max(0, (w - len(title)) // 2), title)
         stdscr.attroff(curses.color_pair(C_HEADER) | curses.A_BOLD)
-        msg = "Próximamente..."
-        stdscr.addstr(h // 2, max(0, (w - len(msg)) // 2), msg, curses.A_BOLD)
+
+        # Search bar
+        search_line = f" Buscar: {search}_" if searching else f" Buscar: {search}"
+        stdscr.attron(curses.color_pair(C_SEARCH) if searching else curses.color_pair(C_DIM))
+        stdscr.addstr(1, 0, search_line[:w - 1].ljust(w - 1))
+        stdscr.attroff(curses.color_pair(C_SEARCH) if searching else curses.color_pair(C_DIM))
+
+        # Tabs placeholder
+        stdscr.attron(curses.color_pair(C_TITLE))
+        stdscr.addstr(2, 0, " [1] Servidores ".ljust(w - 1))
+        stdscr.attroff(curses.color_pair(C_TITLE))
+
+        # Column header
+        stdscr.attron(curses.color_pair(C_TITLE) | curses.A_BOLD)
+        stdscr.addstr(4, 0, f"{'SERVIDOR':<20}  {'IP':<16}  {'USUARIO':<12}  {'PUERTO'}  {'DESCRIPCIÓN'}"[:w - 1].ljust(w - 1))
+        stdscr.attroff(curses.color_pair(C_TITLE) | curses.A_BOLD)
+
+        # List
+        for i, row in enumerate(rows[offset: offset + list_h]):
+            y    = 5 + i
+            idx  = offset + i
+            line = (f"{row['nombre']:<20}  {row['ip']:<16}  "
+                    f"{row['ssh_user']:<12}  {str(row['ssh_port']):<6}  {row['descripcion']}")
+            if idx == selected:
+                stdscr.attron(curses.color_pair(C_SELECTED) | curses.A_BOLD)
+                stdscr.addstr(y, 0, line[:w - 1].ljust(w - 1))
+                stdscr.attroff(curses.color_pair(C_SELECTED) | curses.A_BOLD)
+            else:
+                stdscr.attron(curses.color_pair(C_NORMAL))
+                stdscr.addstr(y, 0, line[:w - 1])
+                stdscr.attroff(curses.color_pair(C_NORMAL))
+
+        # Footer
+        footer_txt = status if status else f"{len(rows)} servidor(es)"
+        shortcuts  = " Enter=SSH  F4=Editar  F2=Nuevo  Supr=Eliminar  q=Menú"
+        left  = shortcuts
+        right = f"  {footer_txt} "
+        line  = left + right.rjust(w - 1 - len(left))
         stdscr.attron(curses.color_pair(C_STATUS))
-        stdscr.addstr(h - 1, 0, " q=Volver al menú ".ljust(w - 1))
+        stdscr.addstr(h - 1, 0, line[:w - 1].ljust(w - 1))
         stdscr.attroff(curses.color_pair(C_STATUS))
         stdscr.refresh()
-        k = stdscr.getch()
-        if k in (ord('q'), ord('Q'), 27):
-            return
+
+        try:
+            key = read_key(stdscr)
+        except curses.error:
+            continue
+
+        if key == -1:
+            continue
+
+        status = ""
+
+        if key in (ord('q'), ord('Q')) and not searching:
+            break
+        elif key == curses.KEY_UP:
+            selected = max(0, selected - 1)
+        elif key == curses.KEY_DOWN:
+            selected = min(len(rows) - 1, selected + 1)
+        elif key == ord('/') and not searching:
+            searching = True
+        elif key in (27, curses.KEY_F5):
+            search = ""; searching = False; selected = 0; offset = 0
+            needs_reload = True
+        elif key in (curses.KEY_BACKSPACE, 127, 8):
+            if search:
+                search = search[:-1]
+                if not search:
+                    searching = False
+                selected = 0; offset = 0; needs_reload = True
+        elif key in (curses.KEY_ENTER, 10, 13) and rows:
+            row = rows[selected]
+            if not row["ssh_password"]:
+                row["ssh_password"] = ask_input(stdscr, f"Contraseña para {row['ssh_user']}@{row['ip']}: ")
+            if row["ssh_password"]:
+                ssh_connect(row["ip"], row["ssh_user"], row["ssh_password"], row["ssh_port"])
+                stdscr = curses.initscr()
+                init_colors(); curses.curs_set(0)
+                stdscr.keypad(True); stdscr.timeout(100)
+                needs_reload = True
+        elif key == curses.KEY_F4 and rows:
+            data = maquina_form(stdscr, rows[selected])
+            if data:
+                try:
+                    db_update_maquina(rows[selected]["nombre"], data)
+                    status = f"✓ {rows[selected]['nombre']} actualizado"
+                except Exception as ex:
+                    status = f"✗ Error: {ex}"
+                needs_reload = True
+            init_colors(); stdscr.keypad(True); stdscr.timeout(100)
+        elif key == curses.KEY_F2:
+            data = maquina_form(stdscr, None)
+            if data:
+                try:
+                    db_insert_maquina(data, sistema="genesis")
+                    status = f"✓ {data['nombre']} creado"
+                except Exception as ex:
+                    status = f"✗ Error: {ex}"
+                needs_reload = True
+            init_colors(); stdscr.keypad(True); stdscr.timeout(100)
+        elif key == curses.KEY_DC and rows:
+            row = rows[selected]
+            if confirm_dialog(stdscr, f"¿Eliminar servidor '{row['nombre']}'?"):
+                try:
+                    db_delete_maquina(row["nombre"])
+                    status = f"✓ {row['nombre']} eliminado"
+                    selected = max(0, selected - 1)
+                except Exception as ex:
+                    status = f"✗ Error: {ex}"
+                needs_reload = True
+            stdscr.touchwin(); stdscr.refresh()
+            init_colors(); stdscr.keypad(True); stdscr.timeout(100)
+        elif 32 <= key <= 126:
+            search += chr(key)
+            searching = True; selected = 0; offset = 0; needs_reload = True
 
 
 def intermedios_main(stdscr):
@@ -3116,7 +3253,7 @@ def cobol_main(stdscr, usuario):
         if needs_reload:
             try:
                 if mode == "maquinas":
-                    rows = fetch_maquinas(search)
+                    rows = fetch_maquinas(search, sistema="cobol")
                 elif mode == "programados":
                     rows = db_fetch_deploys_usuario(usuario)
                 elif mode == "batch":
@@ -3357,7 +3494,7 @@ def cobol_main(stdscr, usuario):
             data = maquina_form(stdscr, None)
             if data:
                 try:
-                    db_insert_maquina(data)
+                    db_insert_maquina(data, sistema="cobol")
                     status = f"✓ {data['nombre']} creado"
                 except Exception as ex:
                     status = f"✗ Error: {ex}"
