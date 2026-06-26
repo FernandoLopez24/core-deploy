@@ -3300,9 +3300,9 @@ TABS = [
     ("2", "Servidores",    "maquinas"),
     ("3", "Deploy",        "deploy"),
     ("4", "Multi-Deploy",  "multideploy"),
-    ("5", "Programados",   "programados"),
-    ("6", "Reinicio",      "reinicio"),
-    ("7", "Batch",         "batch"),
+    ("5", "Reinicio",      "reinicio"),
+    ("6", "Batch",         "batch"),
+    ("7", "Programados",   "programados"),
 ]
 
 
