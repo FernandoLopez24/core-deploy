@@ -3132,15 +3132,18 @@ def _genesis_draw_header(stdscr, mode):
 
 
 def genesis_main(stdscr):
-    mode         = "estado"
-    search       = ""
-    searching    = False
-    selected     = 0
-    offset       = 0
-    status       = ""
-    servers      = []          # lista de maquinas genesis
-    statuses     = {}          # {nombre: (estado, detalle)}
-    needs_reload = True
+    mode           = "estado"
+    search         = ""
+    searching      = False
+    selected       = 0
+    offset         = 0
+    status         = ""
+    servers        = []          # lista de maquinas genesis
+    statuses       = {}          # {nombre: (estado, detalle)}
+    needs_reload   = True
+    last_check     = 0.0         # timestamp del último chequeo de estado
+    check_interval = 5           # segundos entre chequeos automáticos
+    checking       = False       # True mientras hay un thread corriendo
 
     while True:
         if needs_reload:
@@ -3154,6 +3157,33 @@ def genesis_main(stdscr):
                 status = f"ERROR BD: {e}"
                 servers = []
             needs_reload = False
+
+        # ── Auto-chequeo de estado (solo en tab Estado) ────────────────────
+        if mode == "estado" and servers and not checking:
+            if time.time() - last_check >= check_interval:
+                checking = True
+                for s in servers:
+                    if s["nombre"] not in statuses:
+                        statuses[s["nombre"]] = ("?", "Verificando...")
+
+                def _run_checks(srv_list):
+                    nonlocal checking, statuses, last_check
+                    results = {}
+                    threads = []
+                    def _check(s):
+                        results[s["nombre"]] = _genesis_check_status(s)
+                    for s in srv_list:
+                        t = threading.Thread(target=_check, args=(s,), daemon=True)
+                        threads.append(t)
+                        t.start()
+                    for t in threads:
+                        t.join(timeout=12)
+                    statuses = {s["nombre"]: results.get(s["nombre"], ("err", "Sin respuesta"))
+                                for s in srv_list}
+                    last_check = time.time()
+                    checking   = False
+
+                threading.Thread(target=_run_checks, args=(list(servers),), daemon=True).start()
 
         h, w   = stdscr.getmaxyx()
         list_h = h - 7
@@ -3193,7 +3223,9 @@ def genesis_main(stdscr):
                 except curses.error:
                     pass
 
-            footer = f" F5=Verificar  Enter=SSH  ↑↓=Navegar  1-4=Tab  q=Menú   {status} "
+            chk_txt = " actualizando..." if checking else \
+                      (f" actualizado {time.strftime('%H:%M:%S', time.localtime(last_check))}" if last_check else "")
+            footer = f" Enter=SSH  ↑↓=Navegar  1-4=Tab  q=Menú  |{chk_txt}  {status} "
 
         elif mode == "reinicio":
             stdscr.attron(curses.color_pair(C_TITLE) | curses.A_BOLD)
@@ -3276,15 +3308,19 @@ def genesis_main(stdscr):
         if key in (ord('q'), ord('Q')) and not searching:
             break
         elif key in (ord('1'),ord('2'),ord('3'),ord('4')) and not searching:
-            mode = GENESIS_TABS[int(chr(key))-1][2]
-            selected = 0; offset = 0; search = ""; searching = False
-            needs_reload = True
+            nuevo = GENESIS_TABS[int(chr(key))-1][2]
+            if nuevo != mode:
+                mode = nuevo; selected = 0; offset = 0; search = ""; searching = False
+                needs_reload = True
+                if mode == "estado":
+                    last_check = 0.0  # chequear inmediatamente al entrar
             continue
         elif key == 9 and not searching:  # TAB
             modes = [t[2] for t in GENESIS_TABS]
             mode  = modes[(modes.index(mode)+1) % len(modes)]
-            selected = 0; offset = 0
-            needs_reload = True
+            selected = 0; offset = 0; needs_reload = True
+            if mode == "estado":
+                last_check = 0.0
             continue
         elif key == curses.KEY_UP:
             selected = max(0, selected-1)
@@ -3294,18 +3330,7 @@ def genesis_main(stdscr):
 
         # ── Acciones por tab ───────────────────────────────────────────────
         elif mode == "estado":
-            if key == curses.KEY_F5 and servers:
-                # Verificar todos en paralelo
-                statuses = {s["nombre"]: ("checking", "Verificando...") for s in servers}
-                stdscr.refresh()
-                results = {}
-                def check(s):
-                    results[s["nombre"]] = _genesis_check_status(s)
-                threads = [threading.Thread(target=check, args=(s,), daemon=True) for s in servers]
-                for t in threads: t.start()
-                for t in threads: t.join(timeout=15)
-                statuses = {s["nombre"]: results.get(s["nombre"], ("err","Sin respuesta")) for s in servers}
-            elif key in (curses.KEY_ENTER, 10, 13) and servers:
+            if key in (curses.KEY_ENTER, 10, 13) and servers:
                 srv = servers[selected]
                 if not srv["ssh_password"]:
                     srv["ssh_password"] = ask_input(stdscr, f"Contraseña para {srv['ssh_user']}@{srv['ip']}: ")
