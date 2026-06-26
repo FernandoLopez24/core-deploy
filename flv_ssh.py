@@ -3299,7 +3299,7 @@ TABS = [
     ("1", "Clientes",      "clientes"),
     ("2", "Servidores",    "maquinas"),
     ("3", "Deploy",        "deploy"),
-    ("4", "Multi-Archivo",  "multideploy"),
+    ("4", "Deploy-MultiArchivo", "multideploy"),
     ("5", "Reinicio",       "reinicio"),
     ("6", "Multi-Cliente",  "batch"),
     ("7", "Programados",   "programados"),
