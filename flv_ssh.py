@@ -2152,7 +2152,7 @@ def run_deploy(stdscr, row, cbl_file):
 
         # Footer
         if done and not error:
-            footer = " ✓ Deploy completado!  [D]=Cargar DM  Enter=Volver "
+            footer = " ✓ Deploy completado!  Presiona Enter para volver "
             stdscr.attron(curses.color_pair(C_OK) | curses.A_BOLD)
         elif error:
             footer = " ✗ Error en deploy  Presiona Enter para volver "
@@ -2214,6 +2214,15 @@ def run_deploy(stdscr, row, cbl_file):
                 deploy_view_files(stdscr, views, path_hades, libpath,
                                   selected_maqs, hades_env)
         init_colors(); stdscr.keypad(True)
+
+    # ── Preguntar si cargar DM ─────────────────────────────────────────────
+    dm_name = None
+    iniciales = row.get("iniciales", "").strip()
+    dm_default = f"DM{iniciales}" if iniciales else "DM"
+    if confirm_dialog(stdscr, f"¿Cargar DM y reiniciar módulo completo? [{dm_default}]"):
+        dm_input = (ask_input(stdscr, f"Nombre del DM [{dm_default}]: ") or "").strip()
+        dm_name = dm_input if dm_input else dm_default
+    init_colors(); stdscr.keypad(True)
 
     def run_step(idx, cmd, timeout=120, env=None):
         steps[idx][0] = "run"
@@ -2324,21 +2333,20 @@ def run_deploy(stdscr, row, cbl_file):
 
     redraw(done=True, error=error)
 
-    # Esperar Enter (o D para cargar DM) para volver
+    # Si se eligió cargar DM, correrlo automáticamente tras el deploy
+    if not error and dm_name:
+        redraw(done=True, error=False)
+        stdscr.nodelay(False)
+        stdscr.getch()   # esperar Enter para ver el resultado del deploy
+        _run_dm_load(stdscr, ip, user, password, port, path_prod, dm_name, ssh_env)
+        init_colors(); stdscr.keypad(True)
+        return
+
+    # Esperar Enter para volver
     stdscr.nodelay(False)
     while True:
         key = stdscr.getch()
         if key in (curses.KEY_ENTER, 10, 13, ord('q'), ord('Q'), 27):
-            break
-        elif key in (ord('d'), ord('D')) and not error:
-            iniciales  = row.get("iniciales", "").strip()
-            dm_default = f"DM{iniciales}" if iniciales else "DM"
-            dm_name    = (ask_input(stdscr, f"Nombre del DM [{dm_default}]: ") or "").strip()
-            init_colors(); stdscr.keypad(True)
-            if not dm_name:
-                dm_name = dm_default
-            _run_dm_load(stdscr, ip, user, password, port, path_prod, dm_name, ssh_env)
-            init_colors(); stdscr.keypad(True)
             break
 
 
