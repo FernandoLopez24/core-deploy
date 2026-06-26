@@ -4830,7 +4830,49 @@ def cobol_main(stdscr, usuario):
                 if cbl_list:
                     when = deploy_when_picker(stdscr, f"MULTI-DEPLOY — {row['desc_cliente']}")
                     if when == "now":
+                        # ── Detectar vistas en todos los .cbl seleccionados ──
+                        _libpath   = row.get("libpath", "").strip()
+                        _ph        = _resolve_hades_path(row.get("path_hades", ""))
+                        _henv      = _sshenv(HADES.get("password", ""))
+                        _iniciales = row.get("iniciales", "").strip()
+                        _dm_def    = f"DM{_iniciales}" if _iniciales else "DM"
+                        _views     = []
+                        if _libpath and _ph:
+                            try:
+                                _files_arg = " ".join(
+                                    f'"{_ph}/{f}"' for f in cbl_list
+                                )
+                                _gr = subprocess.run(
+                                    hades_cmd_base() + [
+                                        f"grep -i 'copy.*\\.var' {_files_arg} 2>/dev/null || true"
+                                    ],
+                                    capture_output=True, text=True,
+                                    timeout=15, env=_henv,
+                                )
+                                _views = detect_copy_views(_gr.stdout, _ph)
+                            except Exception:
+                                _views = []
+                        _carry_views, _dm_name = _deploy_options_dialog(
+                            stdscr, _views, _dm_def,
+                            f"{len(cbl_list)} archivos",
+                        )
+                        init_colors(); stdscr.keypad(True)
+                        if _carry_views and _views and _libpath:
+                            _all_maqs = fetch_maquinas(sistema="cobol")
+                            _sel_maqs = multiselect_maquinas_dialog(
+                                stdscr, _all_maqs, title="Servidores destino para vistas")
+                            init_colors(); stdscr.keypad(True)
+                            if _sel_maqs:
+                                deploy_view_files(stdscr, _views, _ph, _libpath,
+                                                  _sel_maqs, _henv)
+                            init_colors(); stdscr.keypad(True)
                         run_multi_deploy(stdscr, row, cbl_list)
+                        if _dm_name and row.get("path"):
+                            _ssh_env = _sshenv(row.get("ssh_password", ""))
+                            _run_dm_load(stdscr, row["ip"], row["ssh_user"],
+                                         row["ssh_password"], row["ssh_port"],
+                                         row["path"], _dm_name, _ssh_env)
+                        init_colors(); stdscr.keypad(True)
                     elif when == "schedule":
                         fh = ask_datetime(stdscr)
                         if fh:
