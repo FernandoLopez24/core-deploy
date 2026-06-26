@@ -3141,7 +3141,7 @@ def main(stdscr):
                 init_colors(); stdscr.keypad(True); stdscr.timeout(100)
 
         # ── Configurar email (Ctrl+E) ──────────────────────────────────────
-        elif key == 5:
+        elif key == 5 and not searching:
             email_cfg = _wizard_email_config(stdscr, existing=cfg)
             if email_cfg:
                 cfg.update(email_cfg)
