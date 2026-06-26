@@ -2074,7 +2074,7 @@ def run_multi_deploy(stdscr, row, cbl_files):
 def _run_batch_deploy(stdscr, texto, usuario):
     """Parsea PREFIX/archivo.cbl, agrupa por cliente y ejecuta multi-deploy por cada uno."""
     grupos = {}
-    for linea in texto.splitlines():
+    for linea in texto:
         linea = linea.strip()
         if not linea or '/' not in linea:
             continue
