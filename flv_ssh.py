@@ -437,6 +437,30 @@ def fetch_clientes(search=""):
         conn.close()
 
 
+def fetch_cliente_by_iniciales(iniciales):
+    """Busca un cliente por campo iniciales (insensible a mayúsculas)."""
+    query = """
+        SELECT
+            c.nro_cliente, c.desc_cliente, c.servidor,
+            host(c.ip_servidor) AS ip,
+            c.iniciales, c.desc_cobol, c.path, c.path_hades,
+            COALESCE(m.ssh_user,     'tuxedo') AS ssh_user,
+            COALESCE(m.ssh_password, '')        AS ssh_password,
+            COALESCE(m.ssh_port,     22)        AS ssh_port
+        FROM clientes c
+        LEFT JOIN maquinas m ON LOWER(m.nombre) = LOWER(c.servidor)
+        WHERE UPPER(c.iniciales) = UPPER(%s)
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute(query, (iniciales,))
+            row = cur.fetchone()
+            return dict(row) if row else None
+    finally:
+        conn.close()
+
+
 # ── CRUD Clientes ──────────────────────────────────────────────────────────
 
 CLIENTE_FIELDS = [
@@ -2047,6 +2071,42 @@ def run_multi_deploy(stdscr, row, cbl_files):
 
 # ── Widgets compartidos ────────────────────────────────────────────────────
 
+def _run_batch_deploy(stdscr, texto, usuario):
+    """Parsea PREFIX/archivo.cbl, agrupa por cliente y ejecuta multi-deploy por cada uno."""
+    grupos = {}
+    for linea in texto.splitlines():
+        linea = linea.strip()
+        if not linea or '/' not in linea:
+            continue
+        prefix, archivo = linea.split('/', 1)
+        prefix  = prefix.strip()
+        archivo = archivo.strip()
+        if prefix and archivo:
+            grupos.setdefault(prefix, []).append(archivo)
+
+    if not grupos:
+        _show_message(stdscr, "No se encontraron líneas PREFIX/archivo.cbl válidas", error=True)
+        return
+
+    errores = []
+    for prefix, archivos in grupos.items():
+        row = fetch_cliente_by_iniciales(prefix)
+        if not row:
+            errores.append(f"'{prefix}': sin cliente con esas iniciales")
+            continue
+        if not row.get("path_hades"):
+            errores.append(f"'{prefix}' ({row['desc_cliente']}): sin path_hades")
+            continue
+        if not row.get("path"):
+            errores.append(f"'{prefix}' ({row['desc_cliente']}): sin path producción")
+            continue
+        run_multi_deploy(stdscr, row, archivos)
+        init_colors(); stdscr.keypad(True); stdscr.timeout(100)
+
+    if errores:
+        _show_message(stdscr, "Sin cliente: " + ", ".join(errores), error=True)
+
+
 def _show_message(stdscr, msg, error=False):
     h, w  = stdscr.getmaxyx()
     win_w = min(len(msg) + 8, w - 4)
@@ -2372,6 +2432,27 @@ def draw_programados(stdscr, rows, selected, offset):
 
 # ── Tabs y dibujo ──────────────────────────────────────────────────────────
 
+def draw_batch_tab(stdscr):
+    h, w = stdscr.getmaxyx()
+    lines = [
+        "BATCH DEPLOY",
+        "",
+        "Pega una lista en formato:",
+        "  PREFIX/archivo.cbl",
+        "  (una línea por archivo)",
+        "",
+        "Presiona  Enter  para comenzar.",
+    ]
+    start = max(1, h // 2 - len(lines) // 2)
+    for i, line in enumerate(lines):
+        x = max(0, (w - len(line)) // 2)
+        attr = curses.A_BOLD if i == 0 else curses.A_NORMAL
+        try:
+            stdscr.addstr(start + i, x, line, attr)
+        except curses.error:
+            pass
+
+
 TABS = [
     ("1", "Clientes",      "clientes"),
     ("2", "Servidores",    "maquinas"),
@@ -2381,6 +2462,7 @@ TABS = [
     ("6", "Multi-Deploy",  "multideploy"),
     ("7", "Programados",   "programados"),
     ("8", "Reinicio",      "reinicio"),
+    ("9", "Batch",         "batch"),
 ]
 
 
@@ -2846,6 +2928,8 @@ def main(stdscr):
                     rows = fetch_maquinas(search)
                 elif mode == "programados":
                     rows = db_fetch_deploys_usuario(usuario)
+                elif mode == "batch":
+                    rows = []
                 else:
                     rows = fetch_clientes(search)
                 selected = min(selected, max(0, len(rows) - 1))
@@ -2866,6 +2950,8 @@ def main(stdscr):
         draw_header(stdscr, mode, search, searching)
         if mode == "programados":
             draw_programados(stdscr, rows, selected, offset)
+        elif mode == "batch":
+            draw_batch_tab(stdscr)
         else:
             draw_list(stdscr, rows, selected, offset, mode)
 
@@ -2893,7 +2979,7 @@ def main(stdscr):
             break
 
         # ── Cambiar tab ────────────────────────────────────────────────────
-        elif key in (ord('1'), ord('2'), ord('3'), ord('4'), ord('5'), ord('6'), ord('7'), ord('8')) and not searching:
+        elif key in (ord('1'), ord('2'), ord('3'), ord('4'), ord('5'), ord('6'), ord('7'), ord('8'), ord('9')) and not searching:
             idx  = int(chr(key)) - 1
             mode = TABS[idx][2]
             search = ""; searching = False; selected = 0; offset = 0
@@ -2917,7 +3003,7 @@ def main(stdscr):
             selected = min(len(rows) - 1, selected + list_h)
 
         # ── Activar modo búsqueda ──────────────────────────────────────────
-        elif key == ord('/') and mode != "programados":
+        elif key == ord('/') and mode not in ("programados", "batch"):
             searching = True
 
         # ── Limpiar búsqueda ───────────────────────────────────────────────
@@ -2934,6 +3020,18 @@ def main(stdscr):
 
         # ── Acción con Enter ───────────────────────────────────────────────
         elif key in (curses.KEY_ENTER, 10, 13):
+            if mode == "batch":
+                texto = multiline_input(
+                    stdscr,
+                    title="BATCH DEPLOY — Pega la lista  PREFIX/archivo.cbl",
+                    hint="Un archivo por línea  |  F10 o Ctrl+D = Iniciar  |  ESC = Cancelar",
+                )
+                if texto:
+                    _run_batch_deploy(stdscr, texto, usuario)
+                init_colors(); stdscr.keypad(True); stdscr.timeout(100)
+                needs_reload = True
+                continue
+
             if not rows:
                 status = "No hay resultados"
                 continue
@@ -3150,7 +3248,7 @@ def main(stdscr):
             init_colors(); stdscr.keypad(True); stdscr.timeout(100)
 
         # ── Tipeo en búsqueda ──────────────────────────────────────────────
-        elif 32 <= key <= 126 and mode != "programados":
+        elif 32 <= key <= 126 and mode not in ("programados", "batch"):
             search  += chr(key)
             searching = True
             selected = 0; offset = 0
