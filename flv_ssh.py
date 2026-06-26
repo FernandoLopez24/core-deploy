@@ -1768,16 +1768,17 @@ def find_build_target(build_server_content, int_file):
 # ── Vistas COBOL (LIBAXS) ──────────────────────────────────────────────────
 
 def detect_copy_views(grep_output, path_hades):
-    """Parsea el grep de COPY/LIBAXS de un .cbl. Devuelve lista de (basename, hades_path)."""
+    """Parsea el grep de COPY *.var de un .cbl. Devuelve lista de (basename, hades_path)."""
     import posixpath
     seen = {}
     for line in grep_output.splitlines():
-        m = re.search(r'COPY\s+"([^"]*LIBAXS[^"]*)"', line, re.IGNORECASE)
+        # Detecta: copy "../../LIBxxx/archivo.var"  (cualquier librería LIB*)
+        m = re.search(r'COPY\s+"([^"]*\.var)"', line, re.IGNORECASE)
         if not m:
             continue
-        ref = m.group(1)                                        # ../../LIBAXS/axwpago.var
-        base = posixpath.splitext(posixpath.basename(ref))[0]  # axwpago
-        rel_dir = posixpath.dirname(ref)                        # ../../LIBAXS
+        ref = m.group(1)                                        # ../../LIBCONSIN/coslbanc.var
+        base = posixpath.splitext(posixpath.basename(ref))[0]  # coslbanc
+        rel_dir = posixpath.dirname(ref)                        # ../../LIBCONSIN
         hades_path = posixpath.normpath(
             posixpath.join(path_hades, rel_dir, base + ".V")
         )
@@ -2019,7 +2020,7 @@ def run_deploy(stdscr, row, cbl_file):
             clean_path = path_hades.rstrip("/")
             grep_r = subprocess.run(
                 hades_cmd_base() + [
-                    f'grep -i "LIBAXS" "{clean_path}/{cbl_file}" 2>/dev/null || true'
+                    f"grep -i 'copy.*\\.var' \"{clean_path}/{cbl_file}\" 2>/dev/null || true"
                 ],
                 capture_output=True, text=True, timeout=15, env=hades_env,
             )
