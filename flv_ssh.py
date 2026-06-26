@@ -1637,16 +1637,21 @@ def run_deploy(stdscr, row, cbl_file):
         steps[idx][0] = "run"
         redraw(idx)
         output_lines.append(f"$ {' '.join(cmd)}")
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
-        out = (result.stdout + result.stderr).strip()
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
+            out = (result.stdout + result.stderr).strip()
+            ok  = result.returncode == 0
+        except subprocess.TimeoutExpired:
+            out = f"Timeout ({timeout}s)"
+            ok  = False
         for line in out.splitlines():
             output_lines.append(line)
-        if result.returncode == 0:
+        if ok:
             steps[idx][0] = "ok"
         else:
             steps[idx][0] = "err"
         redraw(idx)
-        return result.returncode == 0
+        return ok
 
     redraw()
     error = False
@@ -1878,8 +1883,11 @@ def _deploy_one_silent(row, cbl_file, build_content, log_cb):
     path_hades = _resolve_hades_path(path_hades)
 
     def run(cmd, timeout=120, env=None):
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
-        return r.returncode == 0, (r.stdout + r.stderr).strip()
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
+            return r.returncode == 0, (r.stdout + r.stderr).strip()
+        except subprocess.TimeoutExpired:
+            return False, f"Timeout ({timeout}s)"
 
     # 1. Compilar en hades
     log_cb(f"  [1/5] cob {cbl_file}")
