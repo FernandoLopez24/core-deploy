@@ -2661,12 +2661,12 @@ def draw_footer(stdscr, msg="", mode=""):
         right = f"  {msg} " if msg else ""
         line  = left + right.rjust(w - 1 - len(left))
     elif mode == "maquinas":
-        shortcuts = " Enter=SSH  F4=Editar  F2=Nuevo  Supr=Eliminar  q=Salir"
+        shortcuts = " Enter=SSH  F4=Editar  F2=Nuevo  Supr=Eliminar  q=Menú"
         left  = shortcuts
         right = f"  {msg} " if msg else ""
         line  = left + right.rjust(w - 1 - len(left))
     elif mode == "clientes":
-        shortcuts = " Enter=SSH  F3=Detalle  F4=Editar  F2=Nuevo  Supr=Eliminar  q=Salir"
+        shortcuts = " Enter=SSH  F3=Detalle  F4=Editar  F2=Nuevo  Supr=Eliminar  q=Menú"
         if msg and not msg.endswith("resultado(s)"):
             left = f" {msg}"
             right = ""
@@ -2687,7 +2687,7 @@ def draw_footer(stdscr, msg="", mode=""):
             right = f"  {msg} " if msg else ""
             line  = left + right.rjust(w - 1 - len(left))
     else:
-        footer = " Enter=Acción  1-8=Tab  ESC=Borrar búsqueda  Ctrl+E=Email  q=Salir "
+        footer = " Enter=Acción  1-9=Tab  ESC=Borrar búsqueda  Ctrl+E=Email  q=Menú "
         line   = f" {msg} " if msg else footer
 
     stdscr.attron(curses.color_pair(C_STATUS))
@@ -3027,48 +3027,82 @@ def reinicio_tuxedo(stdscr, row, usuario=""):
 
 # ── Loop principal ─────────────────────────────────────────────────────────
 
-def main(stdscr):
-    init_colors()
-    curses.curs_set(0)
-    stdscr.keypad(True)
-    stdscr.timeout(100)
+SISTEMAS = [
+    ("1", "COBOL",       "cobol"),
+    ("2", "GENESIS",     "genesis"),
+    ("3", "INTERMEDIOS", "intermedios"),
+]
 
-    # ── Cargar config de usuario ───────────────────────────────────────────
-    cfg = load_user_config()
-    # Correr wizard si no hay config o si le faltan los campos de BD
-    if not cfg or not cfg.get("db_host"):
-        cfg = setup_wizard(stdscr)
-        if not cfg:
+
+def _draw_main_menu(stdscr, selected):
+    h, w = stdscr.getmaxyx()
+    stdscr.erase()
+
+    title = f" {APP_NAME.upper()} v{APP_VERSION} · {APP_CREDIT} "
+    stdscr.attron(curses.color_pair(C_HEADER) | curses.A_BOLD)
+    stdscr.addstr(0, 0, " " * (w - 1))
+    stdscr.addstr(0, max(0, (w - len(title)) // 2), title)
+    stdscr.attroff(curses.color_pair(C_HEADER) | curses.A_BOLD)
+
+    label = "Selecciona el sistema:"
+    stdscr.addstr(h // 2 - len(SISTEMAS) - 1, max(0, (w - len(label)) // 2),
+                  label, curses.A_BOLD)
+
+    for i, (num, nombre, _) in enumerate(SISTEMAS):
+        y    = h // 2 - len(SISTEMAS) // 2 + i
+        text = f"  [{num}]  {nombre:<15}"
+        x    = max(0, (w - len(text)) // 2)
+        if i == selected:
+            stdscr.attron(curses.color_pair(C_SELECTED) | curses.A_BOLD)
+            stdscr.addstr(y, x, text)
+            stdscr.attroff(curses.color_pair(C_SELECTED) | curses.A_BOLD)
+        else:
+            stdscr.addstr(y, x, text)
+
+    footer = " ↑↓=Navegar  Enter=Seleccionar  1-3=Acceso directo  q=Salir "
+    stdscr.attron(curses.color_pair(C_STATUS))
+    stdscr.addstr(h - 1, 0, footer.ljust(w - 1))
+    stdscr.attroff(curses.color_pair(C_STATUS))
+    stdscr.refresh()
+
+
+def genesis_main(stdscr):
+    h, w = stdscr.getmaxyx()
+    while True:
+        stdscr.erase()
+        stdscr.attron(curses.color_pair(C_HEADER) | curses.A_BOLD)
+        stdscr.addstr(0, 0, " GENESIS ".ljust(w - 1))
+        stdscr.attroff(curses.color_pair(C_HEADER) | curses.A_BOLD)
+        msg = "Próximamente..."
+        stdscr.addstr(h // 2, max(0, (w - len(msg)) // 2), msg, curses.A_BOLD)
+        stdscr.attron(curses.color_pair(C_STATUS))
+        stdscr.addstr(h - 1, 0, " q=Volver al menú ".ljust(w - 1))
+        stdscr.attroff(curses.color_pair(C_STATUS))
+        stdscr.refresh()
+        k = stdscr.getch()
+        if k in (ord('q'), ord('Q'), 27):
             return
-        save_user_config(cfg)
 
-    HADES["user"]     = cfg.get("hades_user", "")
-    HADES["auth"]     = cfg.get("hades_auth", "key")
-    HADES["key"]      = cfg.get("hades_key", "")
-    HADES["password"] = cfg.get("hades_password", "")
 
-    DB_CONFIG["host"]     = cfg.get("db_host", "")
-    DB_CONFIG["database"] = cfg.get("db_name", "")
-    DB_CONFIG["user"]     = cfg.get("db_user", "")
-    DB_CONFIG["password"] = cfg.get("db_password", "")
+def intermedios_main(stdscr):
+    h, w = stdscr.getmaxyx()
+    while True:
+        stdscr.erase()
+        stdscr.attron(curses.color_pair(C_HEADER) | curses.A_BOLD)
+        stdscr.addstr(0, 0, " INTERMEDIOS ".ljust(w - 1))
+        stdscr.attroff(curses.color_pair(C_HEADER) | curses.A_BOLD)
+        msg = "Próximamente..."
+        stdscr.addstr(h // 2, max(0, (w - len(msg)) // 2), msg, curses.A_BOLD)
+        stdscr.attron(curses.color_pair(C_STATUS))
+        stdscr.addstr(h - 1, 0, " q=Volver al menú ".ljust(w - 1))
+        stdscr.attroff(curses.color_pair(C_STATUS))
+        stdscr.refresh()
+        k = stdscr.getch()
+        if k in (ord('q'), ord('Q'), 27):
+            return
 
-    # Verificar conexión a la BD con la config ya cargada
-    try:
-        conn = get_connection()
-        conn.close()
-    except Exception as e:
-        curses.endwin()
-        print(f"\nError conectando a la base de datos: {e}")
-        print(f"Config: {DB_CONFIG['user']}@{DB_CONFIG['host']}/{DB_CONFIG['database']}")
-        print(f"\nRevisá la configuración:")
-        print(f"  rm ~/.config/core-deploy/config.json && core-deploy\n")
-        sys.exit(1)
 
-    ensure_schema()
-    ensure_deploys_table()
-
-    usuario = HADES["user"]
-
+def cobol_main(stdscr, usuario):
     mode         = "clientes"
     search       = ""
     searching    = False
@@ -3448,6 +3482,75 @@ def main(stdscr):
             searching = True
             selected = 0; offset = 0
             needs_reload = True
+
+
+def main(stdscr):
+    init_colors()
+    curses.curs_set(0)
+    stdscr.keypad(True)
+    stdscr.timeout(100)
+
+    # ── Cargar config ──────────────────────────────────────────────────────
+    cfg = load_user_config()
+    if not cfg or not cfg.get("db_host"):
+        cfg = setup_wizard(stdscr)
+        if not cfg:
+            return
+        save_user_config(cfg)
+
+    HADES["user"]     = cfg.get("hades_user", "")
+    HADES["auth"]     = cfg.get("hades_auth", "key")
+    HADES["key"]      = cfg.get("hades_key", "")
+    HADES["password"] = cfg.get("hades_password", "")
+
+    DB_CONFIG["host"]     = cfg.get("db_host", "")
+    DB_CONFIG["database"] = cfg.get("db_name", "")
+    DB_CONFIG["user"]     = cfg.get("db_user", "")
+    DB_CONFIG["password"] = cfg.get("db_password", "")
+
+    try:
+        conn = get_connection()
+        conn.close()
+    except Exception as e:
+        curses.endwin()
+        print(f"\nError conectando a la base de datos: {e}")
+        print(f"Config: {DB_CONFIG['user']}@{DB_CONFIG['host']}/{DB_CONFIG['database']}")
+        print(f"\nRevisá la configuración:")
+        print(f"  rm ~/.config/core-deploy/config.json && core-deploy\n")
+        sys.exit(1)
+
+    ensure_schema()
+    ensure_deploys_table()
+
+    usuario  = HADES["user"]
+    selected = 0
+
+    # ── Menú principal ─────────────────────────────────────────────────────
+    while True:
+        _draw_main_menu(stdscr, selected)
+        key = stdscr.getch()
+
+        if key in (ord('q'), ord('Q')):
+            break
+        elif key == curses.KEY_UP:
+            selected = max(0, selected - 1)
+        elif key == curses.KEY_DOWN:
+            selected = min(len(SISTEMAS) - 1, selected + 1)
+        elif key in [ord(s[0]) for s in SISTEMAS]:
+            selected = next(i for i, s in enumerate(SISTEMAS) if ord(s[0]) == key)
+            key = 10  # forzar Enter
+        if key in (curses.KEY_ENTER, 10, 13):
+            sistema = SISTEMAS[selected][2]
+            if sistema == "cobol":
+                cobol_main(stdscr, usuario)
+            elif sistema == "genesis":
+                genesis_main(stdscr)
+            elif sistema == "intermedios":
+                intermedios_main(stdscr)
+            init_colors()
+            curses.curs_set(0)
+            stdscr.keypad(True)
+            stdscr.timeout(100)
 
 
 def run():
