@@ -1893,6 +1893,98 @@ def _run_dm_load(stdscr, ip, user, password, port, path_prod, dm_name, ssh_env):
             break
 
 
+# ── Opciones previas al deploy ─────────────────────────────────────────────
+
+def _deploy_options_dialog(stdscr, views, dm_default, cbl_file):
+    """
+    Pantalla única de opciones antes del deploy.
+    Retorna (carry_views: bool, dm_name: str|None).
+    """
+    opt_views = bool(views)   # checked si hay vistas detectadas
+    opt_dm    = False
+    dm_name   = dm_default
+    cursor    = 0             # 0=vistas, 1=dm
+    options   = []            # se construye dinámicamente
+
+    while True:
+        h, w = stdscr.getmaxyx()
+        stdscr.erase()
+
+        stdscr.attron(curses.color_pair(C_HEADER) | curses.A_BOLD)
+        try:
+            stdscr.addstr(0, 0, f" OPCIONES DE DEPLOY — {cbl_file} "[:w-1].ljust(w-1))
+        except curses.error:
+            pass
+        stdscr.attroff(curses.color_pair(C_HEADER) | curses.A_BOLD)
+
+        row_y = 2
+        options = []
+
+        # Opción vistas
+        if views:
+            view_names = ", ".join(b + ".V" for b, _ in views)
+            mark  = "[x]" if opt_views else "[ ]"
+            label = f"Llevar vista(s): {view_names}"
+            attr  = (curses.color_pair(C_SELECTED) | curses.A_BOLD) if cursor == len(options) \
+                    else curses.color_pair(C_NORMAL)
+            try:
+                stdscr.addstr(row_y, 2, f"  {mark} {label}"[:w-3], attr)
+            except curses.error:
+                pass
+            options.append("views")
+            row_y += 1
+
+        # Opción DM
+        mark  = "[x]" if opt_dm else "[ ]"
+        label = f"Cargar DM y reiniciar módulo"
+        attr  = (curses.color_pair(C_SELECTED) | curses.A_BOLD) if cursor == len(options) \
+                else curses.color_pair(C_NORMAL)
+        try:
+            stdscr.addstr(row_y, 2, f"  {mark} {label}"[:w-3], attr)
+        except curses.error:
+            pass
+        options.append("dm")
+        row_y += 1
+
+        # Nombre DM si está activo
+        if opt_dm:
+            dm_attr = curses.color_pair(C_DIM)
+            try:
+                stdscr.addstr(row_y, 6, f"DM: {dm_name}", dm_attr)
+            except curses.error:
+                pass
+            row_y += 1
+
+        # Footer
+        stdscr.attron(curses.color_pair(C_STATUS))
+        try:
+            stdscr.addstr(h-1, 0,
+                          " ↑↓=Navegar  Espacio=marcar/desmarcar  Enter=Continuar  ESC=Cancelar "[:w-1].ljust(w-1))
+        except curses.error:
+            pass
+        stdscr.attroff(curses.color_pair(C_STATUS))
+        stdscr.refresh()
+
+        k = stdscr.getch()
+        if k == 27:
+            return False, None
+        elif k == curses.KEY_UP:
+            cursor = (cursor - 1) % len(options)
+        elif k == curses.KEY_DOWN:
+            cursor = (cursor + 1) % len(options)
+        elif k == ord(' '):
+            if options[cursor] == "views":
+                opt_views = not opt_views
+            elif options[cursor] == "dm":
+                opt_dm = not opt_dm
+                if opt_dm:
+                    # Pedir nombre del DM inline
+                    inp = (ask_input(stdscr, f"Nombre del DM [{dm_default}]: ") or "").strip()
+                    dm_name = inp if inp else dm_default
+        elif k in (curses.KEY_ENTER, 10, 13):
+            return opt_views, (dm_name if opt_dm else None)
+
+
 # ── Vistas COBOL (LIBAXS) ──────────────────────────────────────────────────
 
 def detect_copy_views(grep_output, path_hades):
@@ -2201,28 +2293,30 @@ def run_deploy(stdscr, row, cbl_file):
         except Exception as _ve:
             views = []
 
-    if views:
-        view_names = ", ".join(b + ".V" for b, _ in views)
-        if confirm_dialog(stdscr, f"Vistas: {view_names}  ¿Llevar también?"):
-            all_maquinas = fetch_maquinas(sistema="cobol")
-            selected_maqs = multiselect_maquinas_dialog(
-                stdscr, all_maquinas,
-                title=f"Servidores destino para: {view_names}",
-            )
-            init_colors(); stdscr.keypad(True)
-            if selected_maqs:
-                deploy_view_files(stdscr, views, path_hades, libpath,
-                                  selected_maqs, hades_env)
+    # ── Pantalla única: opciones de deploy ────────────────────────────────
+    iniciales  = row.get("iniciales", "").strip()
+    dm_default = f"DM{iniciales}" if iniciales else "DM"
+    carry_views = False
+    dm_name     = None
+
+    # Solo mostrar la pantalla si hay algo que preguntar
+    if views or True:   # siempre preguntar DM
+        carry_views, dm_name = _deploy_options_dialog(
+            stdscr, views, dm_default, cbl_file
+        )
         init_colors(); stdscr.keypad(True)
 
-    # ── Preguntar si cargar DM ─────────────────────────────────────────────
-    dm_name = None
-    iniciales = row.get("iniciales", "").strip()
-    dm_default = f"DM{iniciales}" if iniciales else "DM"
-    if confirm_dialog(stdscr, f"¿Cargar DM y reiniciar módulo completo? [{dm_default}]"):
-        dm_input = (ask_input(stdscr, f"Nombre del DM [{dm_default}]: ") or "").strip()
-        dm_name = dm_input if dm_input else dm_default
-    init_colors(); stdscr.keypad(True)
+    if carry_views and views and libpath:
+        all_maquinas = fetch_maquinas(sistema="cobol")
+        selected_maqs = multiselect_maquinas_dialog(
+            stdscr, all_maquinas,
+            title=f"Servidores destino para vistas",
+        )
+        init_colors(); stdscr.keypad(True)
+        if selected_maqs:
+            deploy_view_files(stdscr, views, path_hades, libpath,
+                              selected_maqs, hades_env)
+        init_colors(); stdscr.keypad(True)
 
     def run_step(idx, cmd, timeout=120, env=None):
         steps[idx][0] = "run"
