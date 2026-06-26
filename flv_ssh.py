@@ -1889,17 +1889,24 @@ def _deploy_one_silent(row, cbl_file, build_content, log_cb):
         except subprocess.TimeoutExpired:
             return False, f"Timeout ({timeout}s)"
 
+    def fail(prefix, out):
+        for line in out.splitlines():
+            if line.strip():
+                log_cb(f"    {line.rstrip()}")
+        last = next((l.strip() for l in reversed(out.splitlines()) if l.strip()), out[:80])
+        return False, f"{prefix}: {last}"
+
     # 1. Compilar en hades
     log_cb(f"  [1/5] cob {cbl_file}")
     ok, out = run(hades_cmd_base() + [f'cd "{path_hades}" && cob {cbl_file}'], env=hades_env)
     if not ok:
-        return False, f"Error compilando: {out[-200:]}"
+        return fail("Error compilando", out)
 
     # 2. Descargar .int
     log_cb(f"  [2/5] scp {int_file} ← hades")
     ok, out = run(hades_scp_cmd(f"{path_hades}/{int_file}", local_tmp), timeout=60, env=hades_env)
     if not ok:
-        return False, f"Error descargando .int: {out[-200:]}"
+        return fail("Error descargando .int", out)
 
     # 3. Backup (best-effort)
     log_cb(f"  [3/5] backup {int_file} → {backup_name}")
@@ -1916,7 +1923,7 @@ def _deploy_one_silent(row, cbl_file, build_content, log_cb):
         local_tmp, f"{user}@{_clean_ip(ip)}:{path_prod}/{int_file}",
     ], timeout=60, env=ssh_env)
     if not ok:
-        return False, f"Error subiendo .int: {out[-200:]}"
+        return fail("Error subiendo .int", out)
 
     # 5. Build
     target = find_build_target(build_content, int_file)
@@ -1932,7 +1939,7 @@ def _deploy_one_silent(row, cbl_file, build_content, log_cb):
         pass
 
     if not ok:
-        return False, f"Error en make {target}: {out[-200:]}"
+        return fail(f"Error en make {target}", out)
     return True, f"OK → {target}"
 
 
