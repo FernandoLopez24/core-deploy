@@ -523,6 +523,143 @@ def db_delete_cliente(nro):
         conn.close()
 
 
+# ── CRUD Maquinas ──────────────────────────────────────────────────────────
+
+MAQUINA_FIELDS = [
+    ("nombre",       "Nombre",      "str", False),
+    ("ip",           "IP",          "str", True),
+    ("ssh_user",     "Usuario SSH", "str", True),
+    ("ssh_password", "Contraseña",  "str", True),
+    ("ssh_port",     "Puerto",      "int", True),
+    ("descripcion",  "Descripción", "str", True),
+]
+
+
+def db_insert_maquina(data):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO maquinas (nombre, ip, ssh_user, ssh_password, ssh_port, descripcion)
+                VALUES (%s, %s::inet, %s, %s, %s, %s)
+            """, (
+                data["nombre"], data["ip"], data["ssh_user"],
+                data["ssh_password"], int(data["ssh_port"] or 22), data["descripcion"],
+            ))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def db_update_maquina(nombre, data):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE maquinas SET
+                    ip=%s::inet, ssh_user=%s, ssh_password=%s, ssh_port=%s, descripcion=%s
+                WHERE nombre=%s
+            """, (
+                data["ip"], data["ssh_user"], data["ssh_password"],
+                int(data["ssh_port"] or 22), data["descripcion"], nombre,
+            ))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def db_delete_maquina(nombre):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM maquinas WHERE nombre=%s", (nombre,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def maquina_form(stdscr, row=None):
+    is_new = row is None
+    values = {
+        "nombre":       row["nombre"]       if row else "",
+        "ip":           row["ip"]           if row else "",
+        "ssh_user":     row["ssh_user"]     if row else "tuxedo",
+        "ssh_password": row["ssh_password"] if row else "",
+        "ssh_port":     str(row["ssh_port"] if row else 22),
+        "descripcion":  row["descripcion"]  if row else "",
+    }
+    editable_fields = [f for f in MAQUINA_FIELDS if f[3] or is_new]
+    current = 0
+    error   = ""
+
+    while True:
+        h, w = stdscr.getmaxyx()
+        stdscr.erase()
+
+        titulo = "NUEVO SERVIDOR" if is_new else f"EDITAR SERVIDOR — {values['nombre']}"
+        stdscr.attron(curses.color_pair(C_HEADER) | curses.A_BOLD)
+        stdscr.addstr(0, 0, f" {titulo} ".ljust(w - 1))
+        stdscr.attroff(curses.color_pair(C_HEADER) | curses.A_BOLD)
+
+        for i, (key, label, typ, editable) in enumerate(MAQUINA_FIELDS):
+            y = 2 + i * 2
+            val = values[key]
+            field_idx = editable_fields.index((key, label, typ, editable)) \
+                        if (key, label, typ, editable) in editable_fields else -1
+            is_cur = (field_idx == current)
+            lbl_attr = curses.A_BOLD if is_cur else 0
+            val_attr = (curses.color_pair(C_SELECTED) | curses.A_BOLD) if is_cur \
+                       else (curses.color_pair(C_DIM) if not editable else curses.color_pair(C_NORMAL))
+            stdscr.addstr(y, 2, f"{label:<20}", lbl_attr)
+            display = ("*" * len(val)) if key == "ssh_password" and not is_cur else val
+            val_display = f" {display:<55} " if is_cur else f" {display:<55}"
+            try:
+                stdscr.addstr(y, 24, val_display[:w - 26], val_attr)
+            except curses.error:
+                pass
+
+        if error:
+            stdscr.attron(curses.color_pair(C_ERROR) | curses.A_BOLD)
+            stdscr.addstr(h - 3, 2, f" ✗ {error} ")
+            stdscr.attroff(curses.color_pair(C_ERROR) | curses.A_BOLD)
+
+        stdscr.attron(curses.color_pair(C_STATUS))
+        stdscr.addstr(h - 1, 0,
+            " ↑↓=Navegar  Enter=Editar campo  F10=Guardar  ESC=Cancelar ".ljust(w - 1))
+        stdscr.attroff(curses.color_pair(C_STATUS))
+        stdscr.refresh()
+
+        k = stdscr.getch()
+
+        if k == curses.KEY_F10:
+            if not values["nombre"].strip():
+                error = "El nombre es obligatorio"
+                continue
+            if not values["ip"].strip():
+                error = "La IP es obligatoria"
+                continue
+            try:
+                values["ssh_port"] = str(int(values["ssh_port"]))
+            except ValueError:
+                error = "El puerto debe ser un número"
+                continue
+            return values
+        elif k == 27:
+            return None
+        elif k == curses.KEY_UP:
+            current = max(0, current - 1)
+            error = ""
+        elif k == curses.KEY_DOWN:
+            current = min(len(editable_fields) - 1, current + 1)
+            error = ""
+        elif k in (curses.KEY_ENTER, 10, 13):
+            fkey = editable_fields[current][0]
+            new_val = ask_input(stdscr, f"{editable_fields[current][1]}: ")
+            if new_val is not None:
+                values[fkey] = new_val
+            error = ""
+
+
 def _servidor_picker(stdscr):
     """
     Muestra un picker de servidores de la tabla maquinas.
@@ -2523,6 +2660,11 @@ def draw_footer(stdscr, msg="", mode=""):
         left  = shortcuts
         right = f"  {msg} " if msg else ""
         line  = left + right.rjust(w - 1 - len(left))
+    elif mode == "maquinas":
+        shortcuts = " Enter=SSH  F4=Editar  F2=Nuevo  Supr=Eliminar  q=Salir"
+        left  = shortcuts
+        right = f"  {msg} " if msg else ""
+        line  = left + right.rjust(w - 1 - len(left))
     elif mode == "clientes":
         shortcuts = " Enter=SSH  F3=Detalle  F4=Editar  F2=Nuevo  Supr=Eliminar  q=Salir"
         if msg and not msg.endswith("resultado(s)"):
@@ -3163,6 +3305,44 @@ def main(stdscr):
                 reinicio_tuxedo(stdscr, row, usuario)
                 init_colors(); stdscr.keypad(True); stdscr.timeout(100)
                 needs_reload = True
+
+        # ── Acciones CRUD Servidores ───────────────────────────────────────
+        elif mode == "maquinas" and key == curses.KEY_F4:
+            if rows:
+                data = maquina_form(stdscr, rows[selected])
+                if data:
+                    try:
+                        db_update_maquina(rows[selected]["nombre"], data)
+                        status = f"✓ {rows[selected]['nombre']} actualizado"
+                    except Exception as ex:
+                        status = f"✗ Error: {ex}"
+                    needs_reload = True
+                init_colors(); stdscr.keypad(True); stdscr.timeout(100)
+
+        elif mode == "maquinas" and key == curses.KEY_F2:
+            data = maquina_form(stdscr, None)
+            if data:
+                try:
+                    db_insert_maquina(data)
+                    status = f"✓ {data['nombre']} creado"
+                except Exception as ex:
+                    status = f"✗ Error: {ex}"
+                needs_reload = True
+            init_colors(); stdscr.keypad(True); stdscr.timeout(100)
+
+        elif mode == "maquinas" and key == curses.KEY_DC:
+            if rows:
+                row = rows[selected]
+                if confirm_dialog(stdscr, f"¿Eliminar servidor '{row['nombre']}'?"):
+                    try:
+                        db_delete_maquina(row["nombre"])
+                        status = f"✓ {row['nombre']} eliminado"
+                        selected = max(0, selected - 1)
+                    except Exception as ex:
+                        status = f"✗ Error: {ex}"
+                    needs_reload = True
+                stdscr.touchwin(); stdscr.refresh()
+                init_colors(); stdscr.keypad(True); stdscr.timeout(100)
 
         # ── Acciones CRUD (solo en tab Clientes) ──────────────────────────
         elif mode == "clientes" and key == curses.KEY_F3:
