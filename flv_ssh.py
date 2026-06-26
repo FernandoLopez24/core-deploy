@@ -1857,16 +1857,47 @@ def deploy_view_files(stdscr, views, path_hades_resolved, libpath, maquinas, had
         stdscr.refresh()
 
     for basename, hades_path in views:
+        import posixpath as _pp
         local_tmp = f"/tmp/flv_view_{basename}.V"
         lines.append(f"▶ Vista: {basename}.V")
         draw(f" Descargando {basename}.V desde hades...")
 
-        # 1. Descargar .V de hades
+        # 1. Intentar descargar .V de hades
         dl_cmd = hades_scp_cmd(hades_path, local_tmp)
         r = subprocess.run(dl_cmd, capture_output=True, text=True, timeout=30, env=hades_env)
+
         if r.returncode != 0:
-            lines.append(f"  ✗ Error descargando {basename}.V: {(r.stdout+r.stderr).strip()[:120]}")
-            continue
+            err_out = (r.stdout + r.stderr).strip()
+            if "no such file" in err_out.lower():
+                # .V no existe — compilarlo con viewc32
+                lib_dir  = _pp.dirname(hades_path)          # .../LIBCONSIN
+                base_dir = _pp.dirname(lib_dir)             # .../intraplatinum
+                lib_name = _pp.basename(lib_dir)            # LIBCONSIN
+                src_v    = f"{basename}.v"                  # coslbanc.v
+                lines.append(f"  ! .V no encontrado — compilando: viewc32 -C {src_v}")
+                draw(f" Compilando {src_v} en hades...")
+                vc_cmd = (
+                    f'cd "{base_dir}" && . ./env.desa '
+                    f'&& cd "{lib_name}" && viewc32 -C {src_v}'
+                )
+                vc_r = subprocess.run(
+                    hades_cmd_base() + [vc_cmd],
+                    capture_output=True, text=True, timeout=30, env=hades_env,
+                )
+                for ln in (vc_r.stdout + vc_r.stderr).splitlines():
+                    if ln.strip():
+                        lines.append(f"  {ln}")
+                draw(f" Reintentando descarga de {basename}.V...")
+                r = subprocess.run(dl_cmd, capture_output=True, text=True,
+                                   timeout=30, env=hades_env)
+                if r.returncode != 0:
+                    lines.append(
+                        f"  ✗ {basename}.V: {(r.stdout+r.stderr).strip()[:100]}")
+                    continue
+            else:
+                lines.append(f"  ✗ Error: {err_out[:120]}")
+                continue
+
         lines.append(f"  ✓ {basename}.V descargado")
 
         # 2. Subir a cada maquina
