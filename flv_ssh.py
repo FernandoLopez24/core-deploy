@@ -2384,7 +2384,7 @@ TABS = [
 ]
 
 
-def draw_header(stdscr, mode, search):
+def draw_header(stdscr, mode, search, searching=False):
     h, w = stdscr.getmaxyx()
     title  = f" {APP_NAME.upper()} v{APP_VERSION} · Síntesis "
     credit = f" {APP_CREDIT} "
@@ -2411,7 +2411,10 @@ def draw_header(stdscr, mode, search):
 
     stdscr.attron(curses.color_pair(C_SEARCH))
     stdscr.addstr(3, 0, " " * (w - 1))
-    stdscr.addstr(3, 2, f" Buscar: {search}_")
+    if searching:
+        stdscr.addstr(3, 2, f" BUSCAR: {search}_  [ESC=cancelar]")
+    else:
+        stdscr.addstr(3, 2, f" Buscar: {search}_")
     stdscr.attroff(curses.color_pair(C_SEARCH))
 
 
@@ -2829,6 +2832,7 @@ def main(stdscr):
 
     mode         = "clientes"
     search       = ""
+    searching    = False
     selected     = 0
     offset       = 0
     status       = ""
@@ -2859,7 +2863,7 @@ def main(stdscr):
             offset = selected - list_h + 1
 
         stdscr.erase()
-        draw_header(stdscr, mode, search)
+        draw_header(stdscr, mode, search, searching)
         if mode == "programados":
             draw_programados(stdscr, rows, selected, offset)
         else:
@@ -2885,20 +2889,20 @@ def main(stdscr):
         status = ""
 
         # ── Salir ──────────────────────────────────────────────────────────
-        if key in (ord('q'), ord('Q')):
+        if key in (ord('q'), ord('Q')) and not searching:
             break
 
         # ── Cambiar tab ────────────────────────────────────────────────────
-        elif key in (ord('1'), ord('2'), ord('3'), ord('4'), ord('5'), ord('6'), ord('7'), ord('8')):
+        elif key in (ord('1'), ord('2'), ord('3'), ord('4'), ord('5'), ord('6'), ord('7'), ord('8')) and not searching:
             idx  = int(chr(key)) - 1
             mode = TABS[idx][2]
-            search = ""; selected = 0; offset = 0
+            search = ""; searching = False; selected = 0; offset = 0
             needs_reload = True
 
-        elif key == 9:   # TAB
+        elif key == 9 and not searching:   # TAB
             modes = [t[2] for t in TABS]
             mode  = modes[(modes.index(mode) + 1) % len(modes)]
-            search = ""; selected = 0; offset = 0
+            search = ""; searching = False; selected = 0; offset = 0
             needs_reload = True
 
         # ── Navegación ─────────────────────────────────────────────────────
@@ -2912,13 +2916,19 @@ def main(stdscr):
         elif key == curses.KEY_NPAGE:
             selected = min(len(rows) - 1, selected + list_h)
 
+        # ── Activar modo búsqueda ──────────────────────────────────────────
+        elif key == ord('/') and mode != "programados":
+            searching = True
+
         # ── Limpiar búsqueda ───────────────────────────────────────────────
         elif key in (27, curses.KEY_F5):
-            search = ""; selected = 0; offset = 0
+            search = ""; searching = False; selected = 0; offset = 0
             needs_reload = True
         elif key in (curses.KEY_BACKSPACE, 127, 8):
             if search:
                 search = search[:-1]
+                if not search:
+                    searching = False
                 selected = 0; offset = 0
                 needs_reload = True
 
@@ -3131,7 +3141,7 @@ def main(stdscr):
                 init_colors(); stdscr.keypad(True); stdscr.timeout(100)
 
         # ── Configurar email ───────────────────────────────────────────────
-        elif key in (ord('e'), ord('E')):
+        elif key in (ord('e'), ord('E')) and not searching:
             email_cfg = _wizard_email_config(stdscr, existing=cfg)
             if email_cfg:
                 cfg.update(email_cfg)
@@ -3142,6 +3152,7 @@ def main(stdscr):
         # ── Tipeo en búsqueda ──────────────────────────────────────────────
         elif 32 <= key <= 126 and mode != "programados":
             search  += chr(key)
+            searching = True
             selected = 0; offset = 0
             needs_reload = True
 
