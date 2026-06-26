@@ -1731,6 +1731,125 @@ def cbl_picker(stdscr, row):
             selected = 0; offset = 0
 
 
+def multicbl_picker(stdscr, row):
+    """
+    Lista todos los .cbl del cliente con multi-selección por Espacio.
+    Devuelve lista de nombres seleccionados, o [] si cancela.
+    """
+    path_hades = row.get("path_hades") or ""
+    nombre     = row.get("desc_cliente", "")
+
+    stdscr.erase()
+    stdscr.attron(curses.color_pair(C_HEADER))
+    try:
+        stdscr.addstr(0, 0, f" MULTI-DEPLOY — {nombre} — cargando .cbl...".ljust(stdscr.getmaxyx()[1] - 1))
+    except curses.error:
+        pass
+    stdscr.attroff(curses.color_pair(C_HEADER))
+    stdscr.refresh()
+
+    try:
+        files = list_cbl_files(path_hades)
+    except Exception as e:
+        _show_message(stdscr, f"Error conectando a hades: {e}", error=True)
+        return []
+
+    if not files:
+        _show_message(stdscr, f"No se encontraron .cbl en {path_hades}", error=True)
+        return []
+
+    cursor       = 0
+    offset       = 0
+    search       = ""
+    selected_set = set()
+
+    while True:
+        filtered = [f for f in files if search.lower() in f.lower()]
+        h, w     = stdscr.getmaxyx()
+        list_h   = h - 6
+
+        cursor = min(cursor, max(0, len(filtered) - 1))
+        if cursor < offset:
+            offset = cursor
+        elif cursor >= offset + list_h:
+            offset = cursor - list_h + 1
+
+        stdscr.erase()
+
+        stdscr.attron(curses.color_pair(C_HEADER) | curses.A_BOLD)
+        try:
+            stdscr.addstr(0, 0,
+                f" MULTI-DEPLOY — {nombre} — {len(selected_set)} seleccionado(s) "[:w-1].ljust(w-1))
+        except curses.error:
+            pass
+        stdscr.attroff(curses.color_pair(C_HEADER) | curses.A_BOLD)
+
+        stdscr.attron(curses.color_pair(C_WARN))
+        try: stdscr.addstr(1, 2, f"Hades: {path_hades}")
+        except curses.error: pass
+        stdscr.attroff(curses.color_pair(C_WARN))
+
+        stdscr.attron(curses.color_pair(C_SEARCH))
+        try: stdscr.addstr(2, 0, f" Buscar: {search}_".ljust(w - 1))
+        except curses.error: pass
+        stdscr.attroff(curses.color_pair(C_SEARCH))
+
+        stdscr.attron(curses.color_pair(C_TITLE) | curses.A_BOLD)
+        try: stdscr.addstr(3, 0, f"  {'ARCHIVO':<40}".ljust(w-1))
+        except curses.error: pass
+        stdscr.attroff(curses.color_pair(C_TITLE) | curses.A_BOLD)
+
+        for i, fname in enumerate(filtered[offset: offset + list_h]):
+            idx  = offset + i
+            y    = 4 + i
+            mark = "[x]" if fname in selected_set else "[ ]"
+            line = f"  {mark} {fname}"
+            if idx == cursor:
+                stdscr.attron(curses.color_pair(C_SELECTED) | curses.A_BOLD)
+                try: stdscr.addstr(y, 0, line[:w-1].ljust(w-1))
+                except curses.error: pass
+                stdscr.attroff(curses.color_pair(C_SELECTED) | curses.A_BOLD)
+            else:
+                try: stdscr.addstr(y, 0, line[:w-1])
+                except curses.error: pass
+
+        n_sel = len(selected_set)
+        stdscr.attron(curses.color_pair(C_STATUS))
+        try:
+            stdscr.addstr(h-1, 0,
+                f" Espacio=marcar  Enter=Deploy({n_sel})  ESC/q=Cancelar  [{len(filtered)} archivos] "[:w-1].ljust(w-1))
+        except curses.error:
+            pass
+        stdscr.attroff(curses.color_pair(C_STATUS))
+        stdscr.refresh()
+
+        key = stdscr.getch()
+        if key in (ord('q'), ord('Q'), 27):
+            return []
+        elif key == curses.KEY_UP:
+            cursor = max(0, cursor - 1)
+        elif key == curses.KEY_DOWN:
+            cursor = min(len(filtered) - 1, cursor + 1)
+        elif key == curses.KEY_PPAGE:
+            cursor = max(0, cursor - list_h)
+            offset = max(0, offset - list_h)
+        elif key == curses.KEY_NPAGE:
+            cursor = min(len(filtered) - 1, cursor + list_h)
+        elif key in (curses.KEY_BACKSPACE, 127, 8):
+            search = search[:-1]; cursor = 0; offset = 0
+        elif key == ord(' '):
+            if filtered:
+                f = filtered[cursor]
+                if f in selected_set:
+                    selected_set.discard(f)
+                else:
+                    selected_set.add(f)
+        elif key in (curses.KEY_ENTER, 10, 13):
+            return [f for f in files if f in selected_set]   # orden original
+        elif 32 <= key <= 126:
+            search += chr(key); cursor = 0; offset = 0
+
+
 def find_build_target(build_server_content, int_file):
     """
     Parsea build.server (Makefile) y devuelve el todoXX/TODOXX exacto
@@ -4707,11 +4826,7 @@ def cobol_main(stdscr, usuario):
                 if not row.get("path"):
                     status = f"Sin path producción para {row['desc_cliente']}"
                     continue
-                cbl_list = multiline_input(
-                    stdscr,
-                    title=f"MULTI-DEPLOY — {row['desc_cliente']} — Pega la lista de .cbl",
-                    hint="Un archivo .cbl por línea  |  F10 o Ctrl+D = Iniciar  |  ESC = Cancelar",
-                )
+                cbl_list = multicbl_picker(stdscr, row)
                 if cbl_list:
                     when = deploy_when_picker(stdscr, f"MULTI-DEPLOY — {row['desc_cliente']}")
                     if when == "now":
