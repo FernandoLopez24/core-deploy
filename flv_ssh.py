@@ -1891,9 +1891,21 @@ def deploy_view_files(stdscr, views, path_hades_resolved, libpath, maquinas, had
             else:
                 lines.append(f"  ✓ {maq['nombre']}: {dst}")
         lines.append("")
+    lines.append("  ✓ Todas las vistas copiadas.")
 
-    draw(" Vistas copiadas — continuando con deploy...")
-    time.sleep(1)
+    h3, w3 = stdscr.getmaxyx()
+    stdscr.attron(curses.color_pair(C_OK) | curses.A_BOLD)
+    try:
+        stdscr.addstr(h3-1, 0,
+                      " ✓ Vistas copiadas — Enter para continuar con el deploy COBOL "[:w3-1].ljust(w3-1))
+    except curses.error:
+        pass
+    stdscr.attroff(curses.color_pair(C_OK) | curses.A_BOLD)
+    stdscr.refresh()
+    while True:
+        k = stdscr.getch()
+        if k in (curses.KEY_ENTER, 10, 13, ord('q'), ord('Q'), 27):
+            break
 
 
 def run_deploy(stdscr, row, cbl_file):
