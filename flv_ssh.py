@@ -876,6 +876,7 @@ def show_detail(stdscr, row):
             ("Desc COBOL",       row.get("desc_cobol", "") or "—"),
             ("Path Producción",  row.get("path", "") or "—"),
             ("Path Hades",       row.get("path_hades", "") or "—"),
+            ("Lib Path",         row.get("libpath", "") or "—"),
             ("SSH Usuario",      row.get("ssh_user", "")),
             ("SSH Puerto",       str(row.get("ssh_port", ""))),
         ]
@@ -2012,7 +2013,7 @@ def run_deploy(stdscr, row, cbl_file):
 
         if views:
             view_names = ", ".join(b + ".V" for b, _ in views)
-            if confirm_dialog(stdscr, f"Se detectaron vistas: {view_names}\n¿Llevar también las vistas?"):
+            if confirm_dialog(stdscr, f"Vistas detectadas: {view_names}  ¿Llevar también?"):
                 all_maquinas = fetch_maquinas(sistema="cobol")
                 selected_maqs = multiselect_maquinas_dialog(
                     stdscr, all_maquinas,
