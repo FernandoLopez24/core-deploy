@@ -415,6 +415,7 @@ def fetch_clientes(search=""):
             c.desc_cobol,
             c.path,
             c.path_hades,
+            COALESCE(c.libpath, '')          AS libpath,
             COALESCE(m.ssh_user,     'tuxedo') AS ssh_user,
             COALESCE(m.ssh_password, '')        AS ssh_password,
             COALESCE(m.ssh_port,     22)        AS ssh_port
@@ -444,6 +445,7 @@ def fetch_cliente_by_path_prefix(prefix):
             c.nro_cliente, c.desc_cliente, c.servidor,
             host(c.ip_servidor) AS ip,
             c.iniciales, c.desc_cobol, c.path, c.path_hades,
+            COALESCE(c.libpath, '') AS libpath,
             COALESCE(m.ssh_user,     'tuxedo') AS ssh_user,
             COALESCE(m.ssh_password, '')        AS ssh_password,
             COALESCE(m.ssh_port,     22)        AS ssh_port
@@ -472,6 +474,7 @@ CLIENTE_FIELDS = [
     ("desc_cobol",   "Desc COBOL",        "str",  True),
     ("path",         "Path Producción",   "str",  True),
     ("path_hades",   "Path Hades",        "str",  True),
+    ("libpath",      "Lib Path",          "str",  True),
 ]
 
 
@@ -482,12 +485,12 @@ def db_insert_cliente(data):
             cur.execute("""
                 INSERT INTO clientes
                     (nro_cliente, desc_cliente, servidor, ip_servidor,
-                     iniciales, desc_cobol, path, path_hades)
-                VALUES (%s,%s,%s,%s::inet,%s,%s,%s,%s)
+                     iniciales, desc_cobol, path, path_hades, libpath)
+                VALUES (%s,%s,%s,%s::inet,%s,%s,%s,%s,%s)
             """, (
                 data["nro_cliente"], data["desc_cliente"], data["servidor"],
                 data["ip_servidor"], data["iniciales"], data["desc_cobol"],
-                data["path"], data["path_hades"],
+                data["path"], data["path_hades"], data.get("libpath", ""),
             ))
         conn.commit()
     finally:
@@ -501,12 +504,12 @@ def db_update_cliente(nro, data):
             cur.execute("""
                 UPDATE clientes SET
                     desc_cliente=%s, servidor=%s, ip_servidor=%s::inet,
-                    iniciales=%s, desc_cobol=%s, path=%s, path_hades=%s
+                    iniciales=%s, desc_cobol=%s, path=%s, path_hades=%s, libpath=%s
                 WHERE nro_cliente=%s
             """, (
                 data["desc_cliente"], data["servidor"], data["ip_servidor"],
                 data["iniciales"], data["desc_cobol"], data["path"],
-                data["path_hades"], nro,
+                data["path_hades"], data.get("libpath", ""), nro,
             ))
         conn.commit()
     finally:
@@ -768,6 +771,7 @@ def cliente_form(stdscr, row=None):
         "desc_cobol":   row.get("desc_cobol")   or "" if row else "",
         "path":         row.get("path")         or "" if row else "",
         "path_hades":   row.get("path_hades")   or "" if row else "",
+        "libpath":      row.get("libpath")      or "" if row else "",
     }
     current  = 0
     error    = ""
@@ -947,6 +951,10 @@ def ensure_schema():
             cur.execute("""
                 ALTER TABLE maquinas
                     ADD COLUMN IF NOT EXISTS sistema VARCHAR(50) DEFAULT 'cobol'
+            """)
+            cur.execute("""
+                ALTER TABLE clientes
+                    ADD COLUMN IF NOT EXISTS libpath VARCHAR(500) DEFAULT ''
             """)
         conn.commit()
     finally:
@@ -1756,6 +1764,136 @@ def find_build_target(build_server_content, int_file):
     return None
 
 
+# ── Vistas COBOL (LIBAXS) ──────────────────────────────────────────────────
+
+def detect_copy_views(grep_output, path_hades):
+    """Parsea el grep de COPY/LIBAXS de un .cbl. Devuelve lista de (basename, hades_path)."""
+    import posixpath
+    seen = {}
+    for line in grep_output.splitlines():
+        m = re.search(r'COPY\s+"([^"]*LIBAXS[^"]*)"', line, re.IGNORECASE)
+        if not m:
+            continue
+        ref = m.group(1)                                        # ../../LIBAXS/axwpago.var
+        base = posixpath.splitext(posixpath.basename(ref))[0]  # axwpago
+        rel_dir = posixpath.dirname(ref)                        # ../../LIBAXS
+        hades_path = posixpath.normpath(
+            posixpath.join(path_hades, rel_dir, base + ".V")
+        )
+        seen[base] = hades_path
+    return list(seen.items())   # [(basename, hades_path), ...]
+
+
+def multiselect_maquinas_dialog(stdscr, maquinas, title="¿A qué servidores llevar la vista?"):
+    """Multi-select de maquinas. Devuelve lista de maquinas seleccionadas, o [] si cancela."""
+    if not maquinas:
+        return []
+    selected_set = set(range(len(maquinas)))   # todos preseleccionados
+    cursor = 0
+    while True:
+        h, w = stdscr.getmaxyx()
+        stdscr.erase()
+        stdscr.attron(curses.color_pair(C_HEADER) | curses.A_BOLD)
+        try: stdscr.addstr(0, 0, f" {title} "[:w-1].ljust(w-1))
+        except curses.error: pass
+        stdscr.attroff(curses.color_pair(C_HEADER) | curses.A_BOLD)
+        try: stdscr.addstr(2, 2, "Espacio=marcar/desmarcar  Enter=confirmar  ESC=cancelar",
+                           curses.color_pair(C_DIM))
+        except curses.error: pass
+        for i, maq in enumerate(maquinas):
+            y    = 4 + i
+            mark = "[x]" if i in selected_set else "[ ]"
+            line = f"  {mark} {maq['nombre']:<20}  {maq['ip']}"
+            attr = (curses.color_pair(C_SELECTED) | curses.A_BOLD) if i == cursor \
+                   else curses.color_pair(C_NORMAL)
+            try: stdscr.addstr(y, 0, line[:w-1].ljust(w-1) if i == cursor else line[:w-1], attr)
+            except curses.error: pass
+        stdscr.refresh()
+        k = stdscr.getch()
+        if k == 27:
+            return []
+        elif k == curses.KEY_UP:
+            cursor = (cursor - 1) % len(maquinas)
+        elif k == curses.KEY_DOWN:
+            cursor = (cursor + 1) % len(maquinas)
+        elif k == ord(' '):
+            if cursor in selected_set:
+                selected_set.discard(cursor)
+            else:
+                selected_set.add(cursor)
+        elif k in (curses.KEY_ENTER, 10, 13):
+            return [maquinas[i] for i in sorted(selected_set)]
+
+
+def deploy_view_files(stdscr, views, path_hades_resolved, libpath, maquinas, hades_env):
+    """
+    Copia archivos .V desde hades/LIBAXS al LIBPATH de cada maquina seleccionada.
+    views = [(basename, hades_path), ...]
+    """
+    lines = deque(maxlen=300)
+    h, w  = stdscr.getmaxyx()
+
+    def draw(msg=""):
+        stdscr.erase()
+        stdscr.attron(curses.color_pair(C_HEADER) | curses.A_BOLD)
+        try: stdscr.addstr(0, 0, " DEPLOY VISTAS — LIBAXS ".ljust(w-1))
+        except curses.error: pass
+        stdscr.attroff(curses.color_pair(C_HEADER) | curses.A_BOLD)
+        try: stdscr.addstr(2, 0, "─" * (w-1), curses.color_pair(C_DIM))
+        except curses.error: pass
+        log_h   = h - 5
+        visible = list(lines)[-(log_h):]
+        for i, line in enumerate(visible):
+            try: stdscr.addstr(3 + i, 0, line[:w-1])
+            except curses.error: pass
+        stdscr.attron(curses.color_pair(C_STATUS))
+        try: stdscr.addstr(h-1, 0, msg[:w-1].ljust(w-1))
+        except curses.error: pass
+        stdscr.attroff(curses.color_pair(C_STATUS))
+        stdscr.refresh()
+
+    for basename, hades_path in views:
+        local_tmp = f"/tmp/flv_view_{basename}.V"
+        lines.append(f"▶ Vista: {basename}.V")
+        draw(f" Descargando {basename}.V desde hades...")
+
+        # 1. Descargar .V de hades
+        dl_cmd = hades_scp_cmd(hades_path, local_tmp)
+        r = subprocess.run(dl_cmd, capture_output=True, text=True, timeout=30, env=hades_env)
+        if r.returncode != 0:
+            lines.append(f"  ✗ Error descargando {basename}.V: {(r.stdout+r.stderr).strip()[:120]}")
+            continue
+        lines.append(f"  ✓ {basename}.V descargado")
+
+        # 2. Subir a cada maquina
+        for maq in maquinas:
+            maq_ip   = maq["ip"]
+            maq_user = maq["ssh_user"]
+            maq_port = maq["ssh_port"]
+            maq_pass = maq["ssh_password"]
+            dst      = f"{libpath}/{basename}.V"
+            draw(f" Copiando {basename}.V → {maq['nombre']} ({maq_ip}:{libpath})")
+
+            # Crear directorio si no existe
+            subprocess.run(
+                ssh_cmd_base(maq_ip, maq_user, maq_port) + [f'mkdir -p "{libpath}"'],
+                capture_output=True, text=True, timeout=10, env=_sshenv(maq_pass),
+            )
+
+            ul_cmd, ul_env = _scp_upload_cmd(local_tmp, maq_ip, maq_user, maq_port,
+                                              dst, maq_pass)
+            r2 = subprocess.run(ul_cmd, capture_output=True, text=True, timeout=60, env=ul_env)
+            if r2.returncode != 0:
+                lines.append(
+                    f"  ✗ {maq['nombre']}: {(r2.stdout+r2.stderr).strip()[:100]}")
+            else:
+                lines.append(f"  ✓ {maq['nombre']}: {dst}")
+        lines.append("")
+
+    draw(" Vistas copiadas — continuando con deploy...")
+    time.sleep(1)
+
+
 def run_deploy(stdscr, row, cbl_file):
     """
     Pipeline completo de deploy COBOL:
@@ -1859,6 +1997,32 @@ def run_deploy(stdscr, row, cbl_file):
     ssh_env     = _sshenv(password)
     hades_env   = _sshenv(HADES.get("password", ""))
     path_hades  = _resolve_hades_path(path_hades)
+
+    # ── Detectar vistas COPY LIBAXS ───────────────────────────────────────
+    libpath = row.get("libpath", "").strip()
+    if libpath:
+        try:
+            grep_r = subprocess.run(
+                hades_cmd_base() + [f'grep -i "COPY.*LIBAXS" "{path_hades}/{cbl_file}" 2>/dev/null'],
+                capture_output=True, text=True, timeout=10, env=hades_env,
+            )
+            views = detect_copy_views(grep_r.stdout, path_hades)
+        except Exception:
+            views = []
+
+        if views:
+            view_names = ", ".join(b + ".V" for b, _ in views)
+            if confirm_dialog(stdscr, f"Se detectaron vistas: {view_names}\n¿Llevar también las vistas?"):
+                all_maquinas = fetch_maquinas(sistema="cobol")
+                selected_maqs = multiselect_maquinas_dialog(
+                    stdscr, all_maquinas,
+                    title=f"Servidores destino para: {view_names}",
+                )
+                init_colors(); stdscr.keypad(True)
+                if selected_maqs:
+                    deploy_view_files(stdscr, views, path_hades, libpath,
+                                      selected_maqs, hades_env)
+            init_colors(); stdscr.keypad(True)
 
     def run_step(idx, cmd, timeout=120, env=None):
         steps[idx][0] = "run"
