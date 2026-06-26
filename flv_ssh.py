@@ -437,8 +437,8 @@ def fetch_clientes(search=""):
         conn.close()
 
 
-def fetch_cliente_by_iniciales(iniciales):
-    """Busca un cliente por campo iniciales (insensible a mayúsculas)."""
+def fetch_cliente_by_path_prefix(prefix):
+    """Busca un cliente cuyo path_hades termina en /prefix (insensible a mayúsculas)."""
     query = """
         SELECT
             c.nro_cliente, c.desc_cliente, c.servidor,
@@ -449,12 +449,12 @@ def fetch_cliente_by_iniciales(iniciales):
             COALESCE(m.ssh_port,     22)        AS ssh_port
         FROM clientes c
         LEFT JOIN maquinas m ON LOWER(m.nombre) = LOWER(c.servidor)
-        WHERE UPPER(c.iniciales) = UPPER(%s)
+        WHERE LOWER(regexp_replace(c.path_hades, '^.+/', '')) = LOWER(%s)
     """
     conn = get_connection()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            cur.execute(query, (iniciales,))
+            cur.execute(query, (prefix,))
             row = cur.fetchone()
             return dict(row) if row else None
     finally:
@@ -2090,7 +2090,7 @@ def _run_batch_deploy(stdscr, texto, usuario):
 
     errores = []
     for prefix, archivos in grupos.items():
-        row = fetch_cliente_by_iniciales(prefix)
+        row = fetch_cliente_by_path_prefix(prefix)
         if not row:
             errores.append(f"'{prefix}': sin cliente con esas iniciales")
             continue
