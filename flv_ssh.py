@@ -1777,10 +1777,9 @@ def detect_copy_views(grep_output, path_hades):
         if not m:
             continue
         ref = m.group(1)                                        # ../../LIBCONSIN/coslbanc.var
-        lib_dir = posixpath.basename(posixpath.dirname(ref))    # LIBCONSIN
-        if lib_dir.upper() == "LIBRERIA":                       # librería del sistema — ignorar
-            continue
         base = posixpath.splitext(posixpath.basename(ref))[0]  # coslbanc
+        if base.upper() == "PRO":                               # librería central — nunca se lleva
+            continue
         rel_dir = posixpath.dirname(ref)                        # ../../LIBCONSIN
         hades_path = posixpath.normpath(
             posixpath.join(path_hades, rel_dir, base + ".V")
