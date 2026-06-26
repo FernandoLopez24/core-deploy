@@ -3298,13 +3298,11 @@ def draw_batch_tab(stdscr):
 TABS = [
     ("1", "Clientes",      "clientes"),
     ("2", "Servidores",    "maquinas"),
-    ("3", "Logs",          "logs"),
-    ("4", "Grep vivo",     "grep"),
-    ("5", "Deploy",        "deploy"),
-    ("6", "Multi-Deploy",  "multideploy"),
-    ("7", "Programados",   "programados"),
-    ("8", "Reinicio",      "reinicio"),
-    ("9", "Batch",         "batch"),
+    ("3", "Deploy",        "deploy"),
+    ("4", "Multi-Deploy",  "multideploy"),
+    ("5", "Programados",   "programados"),
+    ("6", "Reinicio",      "reinicio"),
+    ("7", "Batch",         "batch"),
 ]
 
 
@@ -4786,7 +4784,7 @@ def cobol_main(stdscr, usuario):
             break
 
         # ── Cambiar tab ────────────────────────────────────────────────────
-        elif key in (ord('1'), ord('2'), ord('3'), ord('4'), ord('5'), ord('6'), ord('7'), ord('8'), ord('9')) and not searching:
+        elif key in (ord('1'), ord('2'), ord('3'), ord('4'), ord('5'), ord('6'), ord('7')) and not searching:
             idx  = int(chr(key)) - 1
             mode = TABS[idx][2]
             search = ""; searching = False; selected = 0; offset = 0
@@ -4872,26 +4870,6 @@ def cobol_main(stdscr, usuario):
                 init_colors(); curses.curs_set(0)
                 stdscr.keypad(True); stdscr.timeout(100)
                 needs_reload = True
-
-            elif mode == "logs":
-                if not path:
-                    status = f"Sin path para {row['desc_cliente']}"
-                    continue
-                stream_viewer(stdscr, row)
-                init_colors(); stdscr.keypad(True); stdscr.timeout(100)
-                needs_reload = True
-
-            elif mode == "grep":
-                if not path:
-                    status = f"Sin path para {row['desc_cliente']}"
-                    continue
-                patron = ask_input(stdscr, f"Patrón grep para {row['desc_cliente']}: ")
-                if patron:
-                    stream_viewer(stdscr, row, grep_pattern=patron)
-                    init_colors(); stdscr.keypad(True); stdscr.timeout(100)
-                    needs_reload = True
-                else:
-                    status = "Búsqueda cancelada"
 
             elif mode == "deploy":
                 if not row.get("path_hades"):
