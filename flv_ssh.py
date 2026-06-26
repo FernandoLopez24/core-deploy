@@ -3069,81 +3069,197 @@ def _draw_main_menu(stdscr, selected):
     stdscr.refresh()
 
 
+GENESIS_TABS = [
+    ("1", "Estado",      "estado"),
+    ("2", "Reinicio",    "reinicio"),
+    ("3", "Instalacion", "instalacion"),
+    ("4", "Servidores",  "servidores"),
+]
+
+
+def _genesis_check_status(srv):
+    """Consulta si Genesis-CPP está corriendo en el servidor. Devuelve (estado, detalle)."""
+    try:
+        cmd = ssh_cmd_base(srv["ip"], srv["ssh_user"], srv["ssh_port"]) + \
+              ["ps -fea | grep 'Genesis-CPP' | grep -v grep"]
+        r = subprocess.run(cmd, capture_output=True, text=True,
+                           timeout=10, env=_sshenv(srv["ssh_password"]))
+        lines = [l for l in r.stdout.splitlines() if l.strip()]
+        if not lines:
+            return "down", "INACTIVO"
+        # Tomar la línea del proceso hijo (mayor PID o la que tiene CPU time > 0)
+        procs = []
+        for l in lines:
+            parts = l.split()
+            if len(parts) >= 8:
+                procs.append(parts)
+        if procs:
+            p = max(procs, key=lambda x: x[6])  # mayor tiempo de CPU
+            pid     = p[1]
+            cputime = p[6]
+            return "up", f"ACTIVO  PID: {pid}  CPU: {cputime}"
+        return "up", "ACTIVO"
+    except subprocess.TimeoutExpired:
+        return "err", "Timeout"
+    except Exception as ex:
+        return "err", str(ex)[:40]
+
+
+def _genesis_draw_header(stdscr, mode):
+    h, w = stdscr.getmaxyx()
+    title = f" {APP_NAME.upper()} · GENESIS "
+    stdscr.attron(curses.color_pair(C_HEADER) | curses.A_BOLD)
+    stdscr.addstr(0, 0, " " * (w - 1))
+    stdscr.addstr(0, max(0, (w - len(title)) // 2), title)
+    stdscr.attroff(curses.color_pair(C_HEADER) | curses.A_BOLD)
+
+    tabs_line = "  ".join(
+        f"[{n}] {label}" for n, label, m in GENESIS_TABS
+    )
+    stdscr.attron(curses.color_pair(C_TITLE))
+    stdscr.addstr(2, 0, (" " + tabs_line).ljust(w - 1))
+    stdscr.attroff(curses.color_pair(C_TITLE))
+
+    # Resaltar tab activo
+    x = 3
+    for n, label, m in GENESIS_TABS:
+        seg = f"[{n}] {label}"
+        if m == mode:
+            stdscr.attron(curses.color_pair(C_SELECTED) | curses.A_BOLD)
+            stdscr.addstr(2, x, seg)
+            stdscr.attroff(curses.color_pair(C_SELECTED) | curses.A_BOLD)
+        x += len(seg) + 2
+
+
 def genesis_main(stdscr):
+    mode         = "estado"
     search       = ""
     searching    = False
     selected     = 0
     offset       = 0
     status       = ""
-    rows         = []
+    servers      = []          # lista de maquinas genesis
+    statuses     = {}          # {nombre: (estado, detalle)}
     needs_reload = True
 
     while True:
         if needs_reload:
             try:
-                rows = fetch_maquinas(search, sistema="genesis")
-                selected = min(selected, max(0, len(rows) - 1))
+                servers = fetch_maquinas("", sistema="genesis")
+                selected = min(selected, max(0, len(servers) - 1))
+                if mode == "estado":
+                    statuses = {s["nombre"]: ("?", "Sin consultar — F5 para verificar")
+                                for s in servers}
             except Exception as e:
                 status = f"ERROR BD: {e}"
-                rows = []
+                servers = []
             needs_reload = False
 
         h, w   = stdscr.getmaxyx()
-        list_h = h - 6
-
-        if selected < offset:
-            offset = selected
-        elif selected >= offset + list_h:
-            offset = selected - list_h + 1
+        list_h = h - 7
 
         stdscr.erase()
+        _genesis_draw_header(stdscr, mode)
 
-        # Header
-        title = f" {APP_NAME.upper()} · GENESIS "
-        stdscr.attron(curses.color_pair(C_HEADER) | curses.A_BOLD)
-        stdscr.addstr(0, 0, " " * (w - 1))
-        stdscr.addstr(0, max(0, (w - len(title)) // 2), title)
-        stdscr.attroff(curses.color_pair(C_HEADER) | curses.A_BOLD)
+        # ── Render por tab ─────────────────────────────────────────────────
+        if mode == "estado":
+            stdscr.attron(curses.color_pair(C_TITLE) | curses.A_BOLD)
+            stdscr.addstr(4, 0,
+                f"{'SERVIDOR':<20}  {'IP':<16}  {'ESTADO':<8}  DETALLE"[:w-1].ljust(w-1))
+            stdscr.attroff(curses.color_pair(C_TITLE) | curses.A_BOLD)
 
-        # Search bar
-        search_line = f" Buscar: {search}_" if searching else f" Buscar: {search}"
-        stdscr.attron(curses.color_pair(C_SEARCH) if searching else curses.color_pair(C_DIM))
-        stdscr.addstr(1, 0, search_line[:w - 1].ljust(w - 1))
-        stdscr.attroff(curses.color_pair(C_SEARCH) if searching else curses.color_pair(C_DIM))
+            rows = servers
+            if selected < offset:           offset = selected
+            elif selected >= offset+list_h: offset = selected - list_h + 1
 
-        # Tabs placeholder
-        stdscr.attron(curses.color_pair(C_TITLE))
-        stdscr.addstr(2, 0, " [1] Servidores ".ljust(w - 1))
-        stdscr.attroff(curses.color_pair(C_TITLE))
+            for i, srv in enumerate(rows[offset: offset + list_h]):
+                idx   = offset + i
+                y     = 5 + i
+                st, det = statuses.get(srv["nombre"], ("?", ""))
+                if st == "up":
+                    mark = "✓"; attr = curses.color_pair(C_OK) | curses.A_BOLD
+                elif st == "down":
+                    mark = "✗"; attr = curses.color_pair(C_ERROR) | curses.A_BOLD
+                elif st == "err":
+                    mark = "!"; attr = curses.color_pair(C_WARN) | curses.A_BOLD
+                else:
+                    mark = "?"; attr = curses.color_pair(C_DIM)
+                line = f"{srv['nombre']:<20}  {srv['ip']:<16}  {mark}       {det}"
+                sel_attr = (curses.color_pair(C_SELECTED)|curses.A_BOLD) if idx==selected else attr
+                try:
+                    stdscr.attron(sel_attr)
+                    stdscr.addstr(y, 0, line[:w-1].ljust(w-1) if idx==selected else line[:w-1])
+                    stdscr.attroff(sel_attr)
+                except curses.error:
+                    pass
 
-        # Column header
-        stdscr.attron(curses.color_pair(C_TITLE) | curses.A_BOLD)
-        stdscr.addstr(4, 0, f"{'SERVIDOR':<20}  {'IP':<16}  {'USUARIO':<12}  {'PUERTO'}  {'DESCRIPCIÓN'}"[:w - 1].ljust(w - 1))
-        stdscr.attroff(curses.color_pair(C_TITLE) | curses.A_BOLD)
+            footer = f" F5=Verificar  Enter=SSH  ↑↓=Navegar  1-4=Tab  q=Menú   {status} "
 
-        # List
-        for i, row in enumerate(rows[offset: offset + list_h]):
-            y    = 5 + i
-            idx  = offset + i
-            line = (f"{row['nombre']:<20}  {row['ip']:<16}  "
-                    f"{row['ssh_user']:<12}  {str(row['ssh_port']):<6}  {row['descripcion']}")
-            if idx == selected:
-                stdscr.attron(curses.color_pair(C_SELECTED) | curses.A_BOLD)
-                stdscr.addstr(y, 0, line[:w - 1].ljust(w - 1))
-                stdscr.attroff(curses.color_pair(C_SELECTED) | curses.A_BOLD)
-            else:
-                stdscr.attron(curses.color_pair(C_NORMAL))
-                stdscr.addstr(y, 0, line[:w - 1])
-                stdscr.attroff(curses.color_pair(C_NORMAL))
+        elif mode == "reinicio":
+            stdscr.attron(curses.color_pair(C_TITLE) | curses.A_BOLD)
+            stdscr.addstr(4, 0,
+                f"{'SERVIDOR':<20}  {'IP':<16}  {'DESCRIPCIÓN'}"[:w-1].ljust(w-1))
+            stdscr.attroff(curses.color_pair(C_TITLE) | curses.A_BOLD)
 
-        # Footer
-        footer_txt = status if status else f"{len(rows)} servidor(es)"
-        shortcuts  = " Enter=SSH  F4=Editar  F2=Nuevo  Supr=Eliminar  q=Menú"
-        left  = shortcuts
-        right = f"  {footer_txt} "
-        line  = left + right.rjust(w - 1 - len(left))
+            rows = servers
+            if selected < offset:           offset = selected
+            elif selected >= offset+list_h: offset = selected - list_h + 1
+
+            for i, srv in enumerate(rows[offset: offset + list_h]):
+                idx  = offset + i
+                y    = 5 + i
+                line = f"{srv['nombre']:<20}  {srv['ip']:<16}  {srv['descripcion']}"
+                if idx == selected:
+                    stdscr.attron(curses.color_pair(C_SELECTED) | curses.A_BOLD)
+                    stdscr.addstr(y, 0, line[:w-1].ljust(w-1))
+                    stdscr.attroff(curses.color_pair(C_SELECTED) | curses.A_BOLD)
+                else:
+                    try: stdscr.addstr(y, 0, line[:w-1])
+                    except curses.error: pass
+
+            footer = f" Enter=Reiniciar Genesis-CPP  ↑↓=Navegar  1-4=Tab  q=Menú   {status} "
+
+        elif mode == "instalacion":
+            msg = "Instalación — Próximamente"
+            stdscr.addstr(h//2, max(0,(w-len(msg))//2), msg, curses.A_BOLD)
+            footer = " 1-4=Tab  q=Menú "
+
+        else:  # servidores
+            search_line = f" Buscar: {search}_" if searching else f" Buscar: {search}"
+            stdscr.attron(curses.color_pair(C_SEARCH) if searching else curses.color_pair(C_DIM))
+            stdscr.addstr(1, 0, search_line[:w-1].ljust(w-1))
+            stdscr.attroff(curses.color_pair(C_SEARCH) if searching else curses.color_pair(C_DIM))
+
+            try:
+                rows = fetch_maquinas(search, sistema="genesis")
+            except Exception:
+                rows = servers
+
+            stdscr.attron(curses.color_pair(C_TITLE) | curses.A_BOLD)
+            stdscr.addstr(4, 0,
+                f"{'SERVIDOR':<20}  {'IP':<16}  {'USUARIO':<12}  {'PUERTO'}  {'DESCRIPCIÓN'}"[:w-1].ljust(w-1))
+            stdscr.attroff(curses.color_pair(C_TITLE) | curses.A_BOLD)
+
+            if selected < offset:           offset = selected
+            elif selected >= offset+list_h: offset = selected - list_h + 1
+
+            for i, row in enumerate(rows[offset: offset + list_h]):
+                idx  = offset + i
+                y    = 5 + i
+                line = (f"{row['nombre']:<20}  {row['ip']:<16}  "
+                        f"{row['ssh_user']:<12}  {str(row['ssh_port']):<6}  {row['descripcion']}")
+                if idx == selected:
+                    stdscr.attron(curses.color_pair(C_SELECTED) | curses.A_BOLD)
+                    stdscr.addstr(y, 0, line[:w-1].ljust(w-1))
+                    stdscr.attroff(curses.color_pair(C_SELECTED) | curses.A_BOLD)
+                else:
+                    try: stdscr.addstr(y, 0, line[:w-1])
+                    except curses.error: pass
+
+            footer = f" Enter=SSH  F4=Editar  F2=Nuevo  Supr=Eliminar  1-4=Tab  q=Menú   {status} "
+
         stdscr.attron(curses.color_pair(C_STATUS))
-        stdscr.addstr(h - 1, 0, line[:w - 1].ljust(w - 1))
+        stdscr.addstr(h-1, 0, footer[:w-1].ljust(w-1))
         stdscr.attroff(curses.color_pair(C_STATUS))
         stdscr.refresh()
 
@@ -3151,74 +3267,123 @@ def genesis_main(stdscr):
             key = read_key(stdscr)
         except curses.error:
             continue
-
         if key == -1:
             continue
 
         status = ""
 
+        # ── Navegación global ──────────────────────────────────────────────
         if key in (ord('q'), ord('Q')) and not searching:
             break
-        elif key == curses.KEY_UP:
-            selected = max(0, selected - 1)
-        elif key == curses.KEY_DOWN:
-            selected = min(len(rows) - 1, selected + 1)
-        elif key == ord('/') and not searching:
-            searching = True
-        elif key in (27, curses.KEY_F5):
-            search = ""; searching = False; selected = 0; offset = 0
+        elif key in (ord('1'),ord('2'),ord('3'),ord('4')) and not searching:
+            mode = GENESIS_TABS[int(chr(key))-1][2]
+            selected = 0; offset = 0; search = ""; searching = False
             needs_reload = True
-        elif key in (curses.KEY_BACKSPACE, 127, 8):
-            if search:
-                search = search[:-1]
-                if not search:
-                    searching = False
-                selected = 0; offset = 0; needs_reload = True
-        elif key in (curses.KEY_ENTER, 10, 13) and rows:
-            row = rows[selected]
-            if not row["ssh_password"]:
-                row["ssh_password"] = ask_input(stdscr, f"Contraseña para {row['ssh_user']}@{row['ip']}: ")
-            if row["ssh_password"]:
-                ssh_connect(row["ip"], row["ssh_user"], row["ssh_password"], row["ssh_port"])
-                stdscr = curses.initscr()
-                init_colors(); curses.curs_set(0)
-                stdscr.keypad(True); stdscr.timeout(100)
-                needs_reload = True
-        elif key == curses.KEY_F4 and rows:
-            data = maquina_form(stdscr, rows[selected])
-            if data:
-                try:
-                    db_update_maquina(rows[selected]["nombre"], data)
-                    status = f"✓ {rows[selected]['nombre']} actualizado"
-                except Exception as ex:
-                    status = f"✗ Error: {ex}"
-                needs_reload = True
-            init_colors(); stdscr.keypad(True); stdscr.timeout(100)
-        elif key == curses.KEY_F2:
-            data = maquina_form(stdscr, None)
-            if data:
-                try:
-                    db_insert_maquina(data, sistema="genesis")
-                    status = f"✓ {data['nombre']} creado"
-                except Exception as ex:
-                    status = f"✗ Error: {ex}"
-                needs_reload = True
-            init_colors(); stdscr.keypad(True); stdscr.timeout(100)
-        elif key == curses.KEY_DC and rows:
-            row = rows[selected]
-            if confirm_dialog(stdscr, f"¿Eliminar servidor '{row['nombre']}'?"):
-                try:
-                    db_delete_maquina(row["nombre"])
-                    status = f"✓ {row['nombre']} eliminado"
-                    selected = max(0, selected - 1)
-                except Exception as ex:
-                    status = f"✗ Error: {ex}"
-                needs_reload = True
-            stdscr.touchwin(); stdscr.refresh()
-            init_colors(); stdscr.keypad(True); stdscr.timeout(100)
-        elif 32 <= key <= 126:
-            search += chr(key)
-            searching = True; selected = 0; offset = 0; needs_reload = True
+            continue
+        elif key == 9 and not searching:  # TAB
+            modes = [t[2] for t in GENESIS_TABS]
+            mode  = modes[(modes.index(mode)+1) % len(modes)]
+            selected = 0; offset = 0
+            needs_reload = True
+            continue
+        elif key == curses.KEY_UP:
+            selected = max(0, selected-1)
+        elif key == curses.KEY_DOWN:
+            rows_len = len(servers) if mode != "servidores" else len(rows) if 'rows' in dir() else 0
+            selected = min(max(0, rows_len-1), selected+1)
+
+        # ── Acciones por tab ───────────────────────────────────────────────
+        elif mode == "estado":
+            if key == curses.KEY_F5 and servers:
+                # Verificar todos en paralelo
+                statuses = {s["nombre"]: ("checking", "Verificando...") for s in servers}
+                stdscr.refresh()
+                results = {}
+                def check(s):
+                    results[s["nombre"]] = _genesis_check_status(s)
+                threads = [threading.Thread(target=check, args=(s,), daemon=True) for s in servers]
+                for t in threads: t.start()
+                for t in threads: t.join(timeout=15)
+                statuses = {s["nombre"]: results.get(s["nombre"], ("err","Sin respuesta")) for s in servers}
+            elif key in (curses.KEY_ENTER, 10, 13) and servers:
+                srv = servers[selected]
+                if not srv["ssh_password"]:
+                    srv["ssh_password"] = ask_input(stdscr, f"Contraseña para {srv['ssh_user']}@{srv['ip']}: ")
+                if srv["ssh_password"]:
+                    ssh_connect(srv["ip"], srv["ssh_user"], srv["ssh_password"], srv["ssh_port"])
+                    stdscr = curses.initscr()
+                    init_colors(); curses.curs_set(0)
+                    stdscr.keypad(True); stdscr.timeout(100)
+
+        elif mode == "reinicio":
+            if key in (curses.KEY_ENTER, 10, 13) and servers:
+                srv = servers[selected]
+                if confirm_dialog(stdscr, f"¿Reiniciar Genesis-CPP en '{srv['nombre']}'?"):
+                    try:
+                        cmd = ssh_cmd_base(srv["ip"], srv["ssh_user"], srv["ssh_port"]) + \
+                              ["pkill -f Genesis-CPP; sleep 2; cd /home/sistemas/GENESIS_C/RUN && ./Genesis-CPP &"]
+                        r = subprocess.run(cmd, capture_output=True, text=True,
+                                           timeout=30, env=_sshenv(srv["ssh_password"]))
+                        status = f"✓ Reinicio enviado a {srv['nombre']}"
+                    except Exception as ex:
+                        status = f"✗ Error: {ex}"
+                init_colors(); stdscr.keypad(True); stdscr.timeout(100)
+
+        elif mode == "servidores":
+            if key == ord('/') and not searching:
+                searching = True
+            elif key in (27, curses.KEY_F5):
+                search = ""; searching = False; selected = 0; offset = 0; needs_reload = True
+            elif key in (curses.KEY_BACKSPACE, 127, 8):
+                if search:
+                    search = search[:-1]
+                    if not search: searching = False
+                    selected = 0; offset = 0; needs_reload = True
+            elif key in (curses.KEY_ENTER, 10, 13) and rows:
+                row = rows[selected]
+                if not row["ssh_password"]:
+                    row["ssh_password"] = ask_input(stdscr, f"Contraseña para {row['ssh_user']}@{row['ip']}: ")
+                if row["ssh_password"]:
+                    ssh_connect(row["ip"], row["ssh_user"], row["ssh_password"], row["ssh_port"])
+                    stdscr = curses.initscr()
+                    init_colors(); curses.curs_set(0)
+                    stdscr.keypad(True); stdscr.timeout(100)
+                    needs_reload = True
+            elif key == curses.KEY_F4 and rows:
+                data = maquina_form(stdscr, rows[selected])
+                if data:
+                    try:
+                        db_update_maquina(rows[selected]["nombre"], data)
+                        status = f"✓ {rows[selected]['nombre']} actualizado"
+                    except Exception as ex:
+                        status = f"✗ Error: {ex}"
+                    needs_reload = True
+                init_colors(); stdscr.keypad(True); stdscr.timeout(100)
+            elif key == curses.KEY_F2:
+                data = maquina_form(stdscr, None)
+                if data:
+                    try:
+                        db_insert_maquina(data, sistema="genesis")
+                        status = f"✓ {data['nombre']} creado"
+                    except Exception as ex:
+                        status = f"✗ Error: {ex}"
+                    needs_reload = True
+                init_colors(); stdscr.keypad(True); stdscr.timeout(100)
+            elif key == curses.KEY_DC and rows:
+                row = rows[selected]
+                if confirm_dialog(stdscr, f"¿Eliminar servidor '{row['nombre']}'?"):
+                    try:
+                        db_delete_maquina(row["nombre"])
+                        status = f"✓ {row['nombre']} eliminado"
+                        selected = max(0, selected-1)
+                    except Exception as ex:
+                        status = f"✗ Error: {ex}"
+                    needs_reload = True
+                stdscr.touchwin(); stdscr.refresh()
+                init_colors(); stdscr.keypad(True); stdscr.timeout(100)
+            elif 32 <= key <= 126:
+                search += chr(key)
+                searching = True; selected = 0; offset = 0; needs_reload = True
 
 
 def intermedios_main(stdscr):
