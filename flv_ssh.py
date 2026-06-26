@@ -3028,6 +3028,186 @@ def reinicio_tuxedo(stdscr, row, usuario=""):
             break
 
 
+# ── Reinicio Genesis-CPP ───────────────────────────────────────────────────
+
+def genesis_reinicio_run(stdscr, srv):
+    """Ejecuta el ciclo completo de reinicio de Genesis-CPP en el servidor indicado."""
+    ip       = srv["ip"]
+    user     = srv["ssh_user"]
+    password = srv["ssh_password"]
+    port     = srv["ssh_port"]
+    path     = srv["descripcion"].strip() if srv["descripcion"].strip().startswith("/") \
+               else "/home/sistemas/GENESIS_C/RUN"
+    nombre   = srv["nombre"]
+
+    lines     = deque(maxlen=500)
+    phase_txt = ["—"]
+
+    def draw(footer=""):
+        h, w = stdscr.getmaxyx()
+        stdscr.erase()
+        title = f" REINICIO GENESIS — {nombre}  [{user}@{ip}]  {path} "
+        stdscr.attron(curses.color_pair(C_HEADER) | curses.A_BOLD)
+        try: stdscr.addstr(0, 0, title[:w-1].ljust(w-1))
+        except curses.error: pass
+        stdscr.attroff(curses.color_pair(C_HEADER) | curses.A_BOLD)
+        stdscr.attron(curses.color_pair(C_TITLE) | curses.A_BOLD)
+        try: stdscr.addstr(1, 0, f" Fase: {phase_txt[0]} "[:w-1].ljust(w-1))
+        except curses.error: pass
+        stdscr.attroff(curses.color_pair(C_TITLE) | curses.A_BOLD)
+        try: stdscr.addstr(2, 0, "─" * (w-1), curses.color_pair(C_DIM))
+        except curses.error: pass
+        log_h   = h - 5
+        visible = list(lines)[-(log_h):]
+        for i, line in enumerate(visible):
+            try: stdscr.addstr(3 + i, 0, line[:w-1])
+            except curses.error: pass
+        stdscr.attron(curses.color_pair(C_STATUS))
+        try: stdscr.addstr(h-1, 0, footer[:w-1].ljust(w-1))
+        except curses.error: pass
+        stdscr.attroff(curses.color_pair(C_STATUS))
+        stdscr.refresh()
+
+    def run_phase(cmd_str, phase_name, timeout=120):
+        phase_txt[0] = phase_name
+        lines.append("")
+        lines.append(f"▶ {phase_name}")
+        lines.append(f"  $ {cmd_str}")
+        lines.append("")
+        draw(f" {phase_name}...")
+
+        ssh = ssh_cmd_base(ip, user, port)
+        ssh.insert(3, "-tt")
+        ssh.append(f'cd "{path}" && . ./env.pro && {cmd_str}')
+
+        proc = subprocess.Popen(
+            ssh,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            bufsize=0,
+            env=_sshenv(password),
+        )
+        fl = fcntl.fcntl(proc.stdout.fileno(), fcntl.F_GETFL)
+        fcntl.fcntl(proc.stdout.fileno(), fcntl.F_SETFL, fl | os.O_NONBLOCK)
+
+        stdscr.nodelay(True)
+        deadline = time.time() + timeout
+        try:
+            while proc.poll() is None:
+                try:
+                    raw = proc.stdout.read(4096)
+                    if raw:
+                        for ln in raw.decode("utf-8", errors="replace").splitlines():
+                            if ln.strip():
+                                lines.append(f"  {ln}")
+                except (BlockingIOError, TypeError):
+                    pass
+                draw(f" {phase_name}...")
+                if time.time() > deadline:
+                    lines.append(f"  [!] Timeout ({timeout}s) — continuando...")
+                    proc.kill()
+                    break
+                time.sleep(0.1)
+            try:
+                rest = proc.stdout.read()
+                if rest:
+                    for ln in rest.decode("utf-8", errors="replace").splitlines():
+                        if ln.strip():
+                            lines.append(f"  {ln}")
+            except Exception:
+                pass
+        finally:
+            try: proc.kill()
+            except Exception: pass
+            try: proc.wait(timeout=3)
+            except Exception: pass
+            stdscr.nodelay(False)
+
+    # ── Paso 1: Kill Genesis-CPP ───────────────────────────────────────────
+    phase_txt[0] = "KILL GENESIS-CPP"
+    lines.append("▶ KILL GENESIS-CPP")
+    lines.append("  $ ps -fea | grep Genesis-CPP | grep -v grep")
+    draw(" Buscando procesos Genesis-CPP...")
+
+    ssh_cmd = ssh_cmd_base(ip, user, port) + \
+              ["ps -fea | grep 'Genesis-CPP' | grep -v grep"]
+    try:
+        r = subprocess.run(ssh_cmd, capture_output=True, text=True,
+                           timeout=10, env=_sshenv(password))
+        proc_lines = [l for l in r.stdout.splitlines() if l.strip()]
+        pids = []
+        for l in proc_lines:
+            parts = l.split()
+            if len(parts) >= 2:
+                try: pids.append(parts[1])
+                except Exception: pass
+            lines.append(f"  {l}")
+
+        if pids:
+            kill_cmd = f"kill -9 {' '.join(pids)}"
+            lines.append(f"")
+            lines.append(f"  $ {kill_cmd}")
+            draw(" Matando procesos...")
+            r2 = subprocess.run(
+                ssh_cmd_base(ip, user, port) + [kill_cmd],
+                capture_output=True, text=True, timeout=10, env=_sshenv(password),
+            )
+            lines.append(f"  PIDs eliminados: {' '.join(pids)}")
+        else:
+            lines.append("  (no había procesos Genesis-CPP corriendo)")
+    except Exception as ex:
+        lines.append(f"  [!] Error: {ex}")
+
+    # ── Paso 2: tmshutdown ────────────────────────────────────────────────
+    run_phase("tmshutdown -y", "TMSHUTDOWN", timeout=120)
+
+    # ── Paso 3: dmloadcf ──────────────────────────────────────────────────
+    run_phase("dmloadcf -y DMGENESISC", "DMLOADCF", timeout=60)
+
+    # ── Paso 4: tmboot ────────────────────────────────────────────────────
+    run_phase("tmboot -y", "TMBOOT", timeout=180)
+
+    # ── Paso 5: Iniciar Genesis-CPP en background ─────────────────────────
+    phase_txt[0] = "INICIO GENESIS-CPP"
+    lines.append("")
+    lines.append("▶ INICIO GENESIS-CPP")
+    lines.append("  $ nohup ./Genesis-CPP > /dev/null 2>&1 &")
+    draw(" Iniciando Genesis-CPP...")
+    try:
+        r = subprocess.run(
+            ssh_cmd_base(ip, user, port) + \
+            [f'cd "{path}" && . ./env.pro && nohup ./Genesis-CPP > /dev/null 2>&1 & disown; sleep 1; echo "PID: $!"'],
+            capture_output=True, text=True, timeout=15, env=_sshenv(password),
+        )
+        out = (r.stdout + r.stderr).strip()
+        for ln in out.splitlines():
+            if ln.strip():
+                lines.append(f"  {ln}")
+        lines.append("  ✓ Genesis-CPP iniciado en background")
+    except Exception as ex:
+        lines.append(f"  [!] Error iniciando: {ex}")
+
+    # ── Footer final ──────────────────────────────────────────────────────
+    phase_txt[0] = "COMPLETADO"
+    lines.append("")
+    lines.append("  ✓ Reinicio completado.")
+    draw("")
+    h, w = stdscr.getmaxyx()
+    stdscr.attron(curses.color_pair(C_OK) | curses.A_BOLD)
+    try:
+        stdscr.addstr(h-1, 0, " ✓ Reinicio completado — Enter/q para volver"[:w-1].ljust(w-1))
+    except curses.error:
+        pass
+    stdscr.attroff(curses.color_pair(C_OK) | curses.A_BOLD)
+    stdscr.refresh()
+
+    while True:
+        k = stdscr.getch()
+        if k in (ord('q'), ord('Q'), 27, curses.KEY_ENTER, 10, 13):
+            break
+
+
 # ── Loop principal ─────────────────────────────────────────────────────────
 
 SISTEMAS = [
@@ -3344,14 +3524,8 @@ def genesis_main(stdscr):
             if key in (curses.KEY_ENTER, 10, 13) and servers:
                 srv = servers[selected]
                 if confirm_dialog(stdscr, f"¿Reiniciar Genesis-CPP en '{srv['nombre']}'?"):
-                    try:
-                        cmd = ssh_cmd_base(srv["ip"], srv["ssh_user"], srv["ssh_port"]) + \
-                              ["pkill -f Genesis-CPP; sleep 2; cd /home/sistemas/GENESIS_C/RUN && ./Genesis-CPP &"]
-                        r = subprocess.run(cmd, capture_output=True, text=True,
-                                           timeout=30, env=_sshenv(srv["ssh_password"]))
-                        status = f"✓ Reinicio enviado a {srv['nombre']}"
-                    except Exception as ex:
-                        status = f"✗ Error: {ex}"
+                    genesis_reinicio_run(stdscr, srv)
+                    status = f"✓ Reinicio ejecutado en {srv['nombre']}"
                 init_colors(); stdscr.keypad(True); stdscr.timeout(100)
 
         elif mode == "servidores":
