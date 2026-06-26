@@ -1023,12 +1023,16 @@ def db_fetch_deploys_pendientes():
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             cur.execute("""
-                SELECT d.*, c.ip_servidor::text AS ip, c.path, c.path_hades,
-                       COALESCE(m.ssh_user, 'tuxedo') AS ssh_user,
-                       COALESCE(m.ssh_password, '')   AS ssh_password,
-                       COALESCE(m.ssh_port, 22)       AS ssh_port
+                SELECT d.*,
+                       COALESCE(c.ip_servidor::text, '') AS ip,
+                       COALESCE(c.path, '')              AS path,
+                       COALESCE(c.path_hades, '')        AS path_hades,
+                       COALESCE(m.ssh_user, 'tuxedo')   AS ssh_user,
+                       COALESCE(m.ssh_password, '')      AS ssh_password,
+                       COALESCE(m.ssh_port, 22)          AS ssh_port
                 FROM deploys_programados d
-                JOIN clientes c ON c.nro_cliente = d.nro_cliente
+                LEFT JOIN clientes c ON c.nro_cliente = d.nro_cliente
+                                     AND d.nro_cliente > 0
                 LEFT JOIN maquinas m ON LOWER(m.nombre) = LOWER(c.servidor)
                 WHERE d.estado = 'pendiente'
                   AND d.fecha_hora <= NOW()
@@ -1178,8 +1182,91 @@ def _run_scheduled_reinicio(deploy):
     threading.Thread(target=send_notification, args=(cfg, subject, body), daemon=True).start()
 
 
+def _run_scheduled_genesis_reinicio_headless(servidor_nombre):
+    """Ejecuta reinicio Genesis-CPP en background, sin UI curses."""
+    try:
+        servers = fetch_maquinas(sistema="genesis")
+        srv = next((s for s in servers if s["nombre"] == servidor_nombre), None)
+        if not srv:
+            return
+    except Exception:
+        return
+
+    ip       = srv["ip"]
+    user     = srv["ssh_user"]
+    password = srv["ssh_password"]
+    port     = srv["ssh_port"]
+    path     = srv["descripcion"].strip() if srv["descripcion"].strip().startswith("/") \
+               else "/home/sistemas/GENESIS_C/RUN"
+    STALL    = 30
+
+    def run_cmd(cmd_str, timeout=180):
+        ssh = ssh_cmd_base(ip, user, port)
+        ssh.insert(3, "-tt")
+        ssh.append(f'cd "{path}" && . ./env.pro && {cmd_str}')
+        proc = subprocess.Popen(ssh, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, bufsize=0, env=_sshenv(password))
+        fl = fcntl.fcntl(proc.stdout.fileno(), fcntl.F_GETFL)
+        fcntl.fcntl(proc.stdout.fileno(), fcntl.F_SETFL, fl | os.O_NONBLOCK)
+        last_out = time.time()
+        deadline = time.time() + timeout
+        while proc.poll() is None:
+            try:
+                raw = proc.stdout.read(4096)
+                if raw:
+                    last_out = time.time()
+            except (BlockingIOError, TypeError):
+                pass
+            if time.time() - last_out > STALL:
+                try:
+                    proc.stdin.write(b'y\n'); proc.stdin.flush()
+                except Exception:
+                    pass
+                last_out = time.time()
+            if time.time() > deadline:
+                proc.kill()
+                break
+            time.sleep(0.1)
+        try: proc.kill()
+        except Exception: pass
+        try: proc.wait(timeout=3)
+        except Exception: pass
+
+    try:
+        r = subprocess.run(
+            ssh_cmd_base(ip, user, port) + ["ps -fea | grep 'Genesis-CPP' | grep -v grep"],
+            capture_output=True, text=True, timeout=10, env=_sshenv(password),
+        )
+        pids = [l.split()[1] for l in r.stdout.splitlines()
+                if l.strip() and len(l.split()) >= 2]
+        if pids:
+            subprocess.run(
+                ssh_cmd_base(ip, user, port) + [f"kill -9 {' '.join(pids)}"],
+                capture_output=True, text=True, timeout=10, env=_sshenv(password),
+            )
+    except Exception:
+        pass
+
+    run_cmd("tmshutdown -y",      timeout=120)
+    run_cmd("dmloadcf -y DMGENESISC", timeout=60)
+    run_cmd("tmboot -y",          timeout=180)
+
+    try:
+        subprocess.run(
+            ssh_cmd_base(ip, user, port) + [
+                f'cd "{path}" && . ./env.pro && nohup ./Genesis-CPP > /dev/null 2>&1 & disown'
+            ],
+            capture_output=True, text=True, timeout=15, env=_sshenv(password),
+        )
+    except Exception:
+        pass
+
+
 def _run_scheduled_deploy(deploy):
     """Ejecuta un deploy o reinicio programado en segundo plano (sin UI curses)."""
+    if deploy["servicios"] == ["__genesis_reinicio__"]:
+        _run_scheduled_genesis_reinicio_headless(deploy["desc_cliente"])
+        return
     if deploy["servicios"] == ["__reinicio__"]:
         _run_scheduled_reinicio(deploy)
         return
@@ -3028,6 +3115,278 @@ def reinicio_tuxedo(stdscr, row, usuario=""):
             break
 
 
+# ── Instalación Genesis-CPP ────────────────────────────────────────────────
+
+def _scp_cmd(src_ip, src_user, src_port, src_path, dst_path, password):
+    """SCP desde servidor remoto a ruta local."""
+    return (
+        ["sshpass", "-e", "scp",
+         "-o", "StrictHostKeyChecking=no",
+         "-o", "UserKnownHostsFile=/dev/null",
+         "-o", "LogLevel=QUIET",
+         "-P", str(src_port),
+         f"{src_user}@{_clean_ip(src_ip)}:{src_path}",
+         dst_path],
+        _sshenv(password),
+    )
+
+
+def _scp_upload_cmd(local_path, dst_ip, dst_user, dst_port, dst_path, password):
+    """SCP desde ruta local a servidor remoto."""
+    return (
+        ["sshpass", "-e", "scp",
+         "-o", "StrictHostKeyChecking=no",
+         "-o", "UserKnownHostsFile=/dev/null",
+         "-o", "LogLevel=QUIET",
+         "-P", str(dst_port),
+         local_path,
+         f"{dst_user}@{_clean_ip(dst_ip)}:{dst_path}"],
+        _sshenv(password),
+    )
+
+
+def genesis_instalacion_run(stdscr, srv, ares_srv):
+    """Instala nueva versión de Genesis-CPP desde ares al servidor prod indicado."""
+    ip           = srv["ip"]
+    user         = srv["ssh_user"]
+    password     = srv["ssh_password"]
+    port         = srv["ssh_port"]
+    path         = srv["descripcion"].strip() if srv["descripcion"].strip().startswith("/") \
+                   else "/home/sistemas/GENESIS_C/RUN"
+    nombre       = srv["nombre"]
+
+    ares_ip      = ares_srv["ip"]
+    ares_user    = ares_srv["ssh_user"]
+    ares_password= ares_srv["ssh_password"]
+    ares_port    = ares_srv["ssh_port"]
+    ares_path    = ares_srv["descripcion"].strip() if ares_srv["descripcion"].strip().startswith("/") \
+                   else "/home/sistemas/GENESIS_C/RUN"
+
+    lines     = deque(maxlen=500)
+    phase_txt = ["—"]
+    local_tmp = "/tmp/genesis_install"
+
+    def draw(footer=""):
+        h2, w2 = stdscr.getmaxyx()
+        stdscr.erase()
+        title = f" INSTALACIÓN GENESIS — {nombre}  [{user}@{ip}]  {path} "
+        stdscr.attron(curses.color_pair(C_HEADER) | curses.A_BOLD)
+        try: stdscr.addstr(0, 0, title[:w2-1].ljust(w2-1))
+        except curses.error: pass
+        stdscr.attroff(curses.color_pair(C_HEADER) | curses.A_BOLD)
+        stdscr.attron(curses.color_pair(C_TITLE) | curses.A_BOLD)
+        try: stdscr.addstr(1, 0, f" Fase: {phase_txt[0]} "[:w2-1].ljust(w2-1))
+        except curses.error: pass
+        stdscr.attroff(curses.color_pair(C_TITLE) | curses.A_BOLD)
+        try: stdscr.addstr(2, 0, "─" * (w2-1), curses.color_pair(C_DIM))
+        except curses.error: pass
+        log_h   = h2 - 5
+        visible = list(lines)[-(log_h):]
+        for i, line in enumerate(visible):
+            try: stdscr.addstr(3 + i, 0, line[:w2-1])
+            except curses.error: pass
+        stdscr.attron(curses.color_pair(C_STATUS))
+        try: stdscr.addstr(h2-1, 0, footer[:w2-1].ljust(w2-1))
+        except curses.error: pass
+        stdscr.attroff(curses.color_pair(C_STATUS))
+        stdscr.refresh()
+
+    def run_phase(cmd_str, phase_name, timeout=180):
+        phase_txt[0] = phase_name
+        lines.append("")
+        lines.append(f"▶ {phase_name}")
+        lines.append(f"  $ {cmd_str}")
+        lines.append("")
+        draw(f" {phase_name}...")
+
+        ssh = ssh_cmd_base(ip, user, port)
+        ssh.insert(3, "-tt")
+        ssh.append(f'cd "{path}" && . ./env.pro && {cmd_str}')
+
+        proc = subprocess.Popen(ssh, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, bufsize=0, env=_sshenv(password))
+        fl = fcntl.fcntl(proc.stdout.fileno(), fcntl.F_GETFL)
+        fcntl.fcntl(proc.stdout.fileno(), fcntl.F_SETFL, fl | os.O_NONBLOCK)
+
+        stdscr.nodelay(True)
+        deadline = time.time() + timeout
+        try:
+            while proc.poll() is None:
+                try:
+                    raw = proc.stdout.read(4096)
+                    if raw:
+                        for ln in raw.decode("utf-8", errors="replace").splitlines():
+                            if ln.strip():
+                                lines.append(f"  {ln}")
+                except (BlockingIOError, TypeError):
+                    pass
+                draw(f" {phase_name}...")
+                if time.time() > deadline:
+                    lines.append(f"  [!] Timeout ({timeout}s) — continuando...")
+                    proc.kill()
+                    break
+                time.sleep(0.1)
+            try:
+                rest = proc.stdout.read()
+                if rest:
+                    for ln in rest.decode("utf-8", errors="replace").splitlines():
+                        if ln.strip():
+                            lines.append(f"  {ln}")
+            except Exception:
+                pass
+        finally:
+            try: proc.kill()
+            except Exception: pass
+            try: proc.wait(timeout=3)
+            except Exception: pass
+            stdscr.nodelay(False)
+
+    def scp_phase(phase_name, cmd_list, env_dict, timeout=180):
+        phase_txt[0] = phase_name
+        lines.append("")
+        lines.append(f"▶ {phase_name}")
+        draw(f" {phase_name}...")
+        try:
+            r = subprocess.run(cmd_list, capture_output=True, text=True,
+                               timeout=timeout, env=env_dict)
+            out = (r.stdout + r.stderr).strip()
+            for ln in out.splitlines():
+                if ln.strip():
+                    lines.append(f"  {ln}")
+            if r.returncode == 0:
+                lines.append(f"  ✓ {phase_name} OK")
+            else:
+                lines.append(f"  ✗ {phase_name} falló (rc={r.returncode})")
+        except subprocess.TimeoutExpired:
+            lines.append(f"  [!] Timeout ({timeout}s)")
+        except Exception as ex:
+            lines.append(f"  [!] Error: {ex}")
+        draw("")
+
+    # ── Paso 1: Kill Genesis-CPP ──────────────────────────────────────────
+    phase_txt[0] = "KILL GENESIS-CPP"
+    lines.append("▶ KILL GENESIS-CPP")
+    draw(" Buscando procesos...")
+    try:
+        r = subprocess.run(
+            ssh_cmd_base(ip, user, port) + ["ps -fea | grep 'Genesis-CPP' | grep -v grep"],
+            capture_output=True, text=True, timeout=10, env=_sshenv(password),
+        )
+        proc_lines = [l for l in r.stdout.splitlines() if l.strip()]
+        pids = []
+        for l in proc_lines:
+            parts = l.split()
+            if len(parts) >= 2:
+                try: pids.append(parts[1])
+                except Exception: pass
+            lines.append(f"  {l}")
+        if pids:
+            kill_cmd = f"kill -9 {' '.join(pids)}"
+            lines.append(f"  $ {kill_cmd}")
+            subprocess.run(ssh_cmd_base(ip, user, port) + [kill_cmd],
+                           capture_output=True, text=True, timeout=10, env=_sshenv(password))
+            lines.append(f"  ✓ PIDs eliminados: {' '.join(pids)}")
+        else:
+            lines.append("  (no había procesos corriendo)")
+    except Exception as ex:
+        lines.append(f"  [!] Error: {ex}")
+
+    # ── Paso 2: tmshutdown ────────────────────────────────────────────────
+    run_phase("tmshutdown -y", "TMSHUTDOWN", timeout=120)
+
+    # ── Paso 3: Backup archivos actuales ──────────────────────────────────
+    phase_txt[0] = "BACKUP"
+    lines.append("")
+    lines.append("▶ BACKUP de archivos actuales → INSTALACIONES/")
+    draw(" Creando backup...")
+    backup_cmd = (
+        f'cd "{path}" && TODAY=$(date +%Y%m%d) '
+        f'&& cp Genesis-CPP INSTALACIONES/Genesis-CPP.$TODAY '
+        f'&& cp libIntWS.so INSTALACIONES/libIntWS.so.$TODAY '
+        f'&& echo "✓ Backup: Genesis-CPP.$TODAY  libIntWS.so.$TODAY"'
+    )
+    try:
+        r = subprocess.run(
+            ssh_cmd_base(ip, user, port) + [backup_cmd],
+            capture_output=True, text=True, timeout=20, env=_sshenv(password),
+        )
+        for ln in (r.stdout + r.stderr).splitlines():
+            if ln.strip(): lines.append(f"  {ln}")
+    except Exception as ex:
+        lines.append(f"  [!] Error en backup: {ex}")
+
+    # ── Paso 4: dmloadcf ─────────────────────────────────────────────────
+    run_phase("dmloadcf -y DMGENESISC", "DMLOADCF", timeout=60)
+
+    # ── Paso 5: tmboot ───────────────────────────────────────────────────
+    run_phase("tmboot -y", "TMBOOT", timeout=180)
+
+    # ── Paso 6+7: Copiar Genesis-CPP desde ares ──────────────────────────
+    os.makedirs(local_tmp, exist_ok=True)
+
+    cmd_dl, env_dl = _scp_cmd(ares_ip, ares_user, ares_port,
+                               f"{ares_path}/Genesis-CPP",
+                               f"{local_tmp}/Genesis-CPP", ares_password)
+    scp_phase("DESCARGA Genesis-CPP (ares→local)", cmd_dl, env_dl, timeout=300)
+
+    cmd_ul, env_ul = _scp_upload_cmd(f"{local_tmp}/Genesis-CPP",
+                                      ip, user, port,
+                                      f"{path}/Genesis-CPP", password)
+    scp_phase(f"SUBIDA Genesis-CPP (local→{nombre})", cmd_ul, env_ul, timeout=300)
+
+    # ── Paso 8+9: Copiar libIntWS.so desde ares ──────────────────────────
+    cmd_dl2, env_dl2 = _scp_cmd(ares_ip, ares_user, ares_port,
+                                  f"{ares_path}/libIntWS.so",
+                                  f"{local_tmp}/libIntWS.so", ares_password)
+    scp_phase("DESCARGA libIntWS.so (ares→local)", cmd_dl2, env_dl2, timeout=120)
+
+    cmd_ul2, env_ul2 = _scp_upload_cmd(f"{local_tmp}/libIntWS.so",
+                                         ip, user, port,
+                                         f"{path}/libIntWS.so", password)
+    scp_phase(f"SUBIDA libIntWS.so (local→{nombre})", cmd_ul2, env_ul2, timeout=120)
+
+    # ── Paso 10: Permisos ─────────────────────────────────────────────────
+    run_phase("chmod +x Genesis-CPP libIntWS.so", "PERMISOS", timeout=15)
+
+    # ── Paso 11: Iniciar Genesis-CPP ─────────────────────────────────────
+    phase_txt[0] = "INICIO GENESIS-CPP"
+    lines.append("")
+    lines.append("▶ INICIO GENESIS-CPP")
+    draw(" Iniciando Genesis-CPP...")
+    try:
+        r = subprocess.run(
+            ssh_cmd_base(ip, user, port) + [
+                f'cd "{path}" && . ./env.pro && nohup ./Genesis-CPP > /dev/null 2>&1 & disown; sleep 1; echo "PID: $!"'
+            ],
+            capture_output=True, text=True, timeout=15, env=_sshenv(password),
+        )
+        for ln in (r.stdout + r.stderr).splitlines():
+            if ln.strip(): lines.append(f"  {ln}")
+        lines.append("  ✓ Genesis-CPP iniciado en background")
+    except Exception as ex:
+        lines.append(f"  [!] Error iniciando: {ex}")
+
+    # ── Footer final ──────────────────────────────────────────────────────
+    phase_txt[0] = "COMPLETADO"
+    lines.append("")
+    lines.append("  ✓ Instalación completada.")
+    h2, w2 = stdscr.getmaxyx()
+    draw("")
+    stdscr.attron(curses.color_pair(C_OK) | curses.A_BOLD)
+    try:
+        stdscr.addstr(h2-1, 0,
+                      " ✓ Instalación completada — Enter/q para volver"[:w2-1].ljust(w2-1))
+    except curses.error:
+        pass
+    stdscr.attroff(curses.color_pair(C_OK) | curses.A_BOLD)
+    stdscr.refresh()
+
+    while True:
+        k = stdscr.getch()
+        if k in (ord('q'), ord('Q'), 27, curses.KEY_ENTER, 10, 13):
+            break
+
+
 # ── Reinicio Genesis-CPP ───────────────────────────────────────────────────
 
 def genesis_reinicio_run(stdscr, srv):
@@ -3438,9 +3797,46 @@ def genesis_main(stdscr):
             footer = f" Enter=Reiniciar Genesis-CPP  ↑↓=Navegar  1-4=Tab  q=Menú   {status} "
 
         elif mode == "instalacion":
-            msg = "Instalación — Próximamente"
-            stdscr.addstr(h//2, max(0,(w-len(msg))//2), msg, curses.A_BOLD)
-            footer = " 1-4=Tab  q=Menú "
+            # Separar ares (fuente) de servidores prod
+            ares_srv   = next((s for s in servers if s["nombre"].lower() == "ares"), None)
+            prod_srvs  = [s for s in servers if s["nombre"].lower() != "ares"]
+
+            # Cabecera info
+            if ares_srv:
+                src_txt = f"  Fuente: {ares_srv['nombre']} ({ares_srv['ip']})  →  " \
+                          f"{len(prod_srvs)} servidor(es) prod"
+            else:
+                src_txt = "  [!] Servidor 'ares' no encontrado — agrégalo en [4] Servidores"
+            stdscr.attron(curses.color_pair(C_DIM))
+            try: stdscr.addstr(3, 0, src_txt[:w-1])
+            except curses.error: pass
+            stdscr.attroff(curses.color_pair(C_DIM))
+
+            stdscr.attron(curses.color_pair(C_TITLE) | curses.A_BOLD)
+            try:
+                stdscr.addstr(4, 0,
+                    f"{'SERVIDOR PROD':<20}  {'IP':<16}  {'RUN PATH'}"[:w-1].ljust(w-1))
+            except curses.error: pass
+            stdscr.attroff(curses.color_pair(C_TITLE) | curses.A_BOLD)
+
+            inst_selected = min(selected, max(0, len(prod_srvs) - 1))
+            if inst_selected < offset:            offset = inst_selected
+            elif inst_selected >= offset+list_h:  offset = inst_selected - list_h + 1
+
+            for i, s in enumerate(prod_srvs[offset: offset + list_h]):
+                idx  = offset + i
+                y    = 5 + i
+                line = f"{s['nombre']:<20}  {s['ip']:<16}  {s['descripcion']}"
+                if idx == inst_selected:
+                    stdscr.attron(curses.color_pair(C_SELECTED) | curses.A_BOLD)
+                    try: stdscr.addstr(y, 0, line[:w-1].ljust(w-1))
+                    except curses.error: pass
+                    stdscr.attroff(curses.color_pair(C_SELECTED) | curses.A_BOLD)
+                else:
+                    try: stdscr.addstr(y, 0, line[:w-1])
+                    except curses.error: pass
+
+            footer = f" Enter=Instalar en servidor  ↑↓=Navegar  1-4=Tab  q=Menú   {status} "
 
         else:  # servidores
             search_line = f" Buscar: {search}_" if searching else f" Buscar: {search}"
@@ -3529,9 +3925,38 @@ def genesis_main(stdscr):
         elif mode == "reinicio":
             if key in (curses.KEY_ENTER, 10, 13) and servers:
                 srv = servers[selected]
-                if confirm_dialog(stdscr, f"¿Reiniciar Genesis-CPP en '{srv['nombre']}'?"):
-                    genesis_reinicio_run(stdscr, srv)
-                    status = f"✓ Reinicio ejecutado en {srv['nombre']}"
+                when = deploy_when_picker(stdscr, f"GENESIS REINICIO — {srv['nombre']}")
+                init_colors(); stdscr.keypad(True); stdscr.timeout(100)
+                if when == "now":
+                    if confirm_dialog(stdscr, f"¿Reiniciar Genesis-CPP en '{srv['nombre']}'?"):
+                        genesis_reinicio_run(stdscr, srv)
+                        status = f"✓ Reinicio ejecutado en {srv['nombre']}"
+                    init_colors(); stdscr.keypad(True); stdscr.timeout(100)
+                elif when == "schedule":
+                    fh = ask_datetime(stdscr)
+                    init_colors(); stdscr.keypad(True); stdscr.timeout(100)
+                    if fh:
+                        db_insert_deploy_programado(
+                            usuario, 0, srv["nombre"],
+                            ["__genesis_reinicio__"], fh,
+                        )
+                        notify_scheduler()
+                        status = f"✓ Reinicio programado: {fh.strftime('%d/%m/%Y %H:%M')}"
+
+        elif mode == "instalacion":
+            prod_srvs_key = [s for s in servers if s["nombre"].lower() != "ares"]
+            ares_srv_key  = next((s for s in servers if s["nombre"].lower() == "ares"), None)
+            if key in (curses.KEY_ENTER, 10, 13) and prod_srvs_key:
+                inst_sel = min(selected, max(0, len(prod_srvs_key) - 1))
+                srv = prod_srvs_key[inst_sel]
+                if not ares_srv_key:
+                    _show_message(stdscr,
+                                  "Servidor 'ares' no encontrado. Agrégalo en [4] Servidores.",
+                                  error=True)
+                elif confirm_dialog(stdscr,
+                                    f"¿Instalar Genesis-CPP en '{srv['nombre']}' desde ares?"):
+                    genesis_instalacion_run(stdscr, srv, ares_srv_key)
+                    status = f"✓ Instalación completada en {srv['nombre']}"
                 init_colors(); stdscr.keypad(True); stdscr.timeout(100)
 
         elif mode == "servidores":
