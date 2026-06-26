@@ -1765,6 +1765,134 @@ def find_build_target(build_server_content, int_file):
     return None
 
 
+# ── Cargar DM Tuxedo ───────────────────────────────────────────────────────
+
+def _run_dm_load(stdscr, ip, user, password, port, path_prod, dm_name, ssh_env):
+    """tmshutdown (con stall→tmipcrm) → dmloadcf -y DM → tmboot, con streaming."""
+    lines     = deque(maxlen=300)
+    phase_txt = ["—"]
+    STALL     = 45   # segundos sin output antes de considerar tmshutdown colgado
+
+    def draw(footer=""):
+        h2, w2 = stdscr.getmaxyx()
+        stdscr.erase()
+        title = f" CARGAR DM — {dm_name}  [{user}@{ip}]  {path_prod} "
+        stdscr.attron(curses.color_pair(C_HEADER) | curses.A_BOLD)
+        try: stdscr.addstr(0, 0, title[:w2-1].ljust(w2-1))
+        except curses.error: pass
+        stdscr.attroff(curses.color_pair(C_HEADER) | curses.A_BOLD)
+        stdscr.attron(curses.color_pair(C_TITLE) | curses.A_BOLD)
+        try: stdscr.addstr(1, 0, f" Fase: {phase_txt[0]} "[:w2-1].ljust(w2-1))
+        except curses.error: pass
+        stdscr.attroff(curses.color_pair(C_TITLE) | curses.A_BOLD)
+        try: stdscr.addstr(2, 0, "─" * (w2-1), curses.color_pair(C_DIM))
+        except curses.error: pass
+        log_h   = h2 - 5
+        visible = list(lines)[-(log_h):]
+        for i, line in enumerate(visible):
+            try: stdscr.addstr(3 + i, 0, line[:w2-1])
+            except curses.error: pass
+        stdscr.attron(curses.color_pair(C_STATUS))
+        try: stdscr.addstr(h2-1, 0, footer[:w2-1].ljust(w2-1))
+        except curses.error: pass
+        stdscr.attroff(curses.color_pair(C_STATUS))
+        stdscr.refresh()
+
+    def run_phase(cmd_str, phase_name, timeout=180, stall_cmd=None):
+        phase_txt[0] = phase_name
+        lines.append("")
+        lines.append(f"▶ {phase_name}")
+        lines.append(f"  $ {cmd_str}")
+        draw(f" {phase_name}...")
+
+        ssh = ssh_cmd_base(ip, user, port)
+        ssh.insert(3, "-tt")
+        ssh.append(f'cd "{path_prod}" && . ./env.pro && {cmd_str}')
+
+        proc = subprocess.Popen(ssh, stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                bufsize=0, env=ssh_env)
+        fl = fcntl.fcntl(proc.stdout.fileno(), fcntl.F_GETFL)
+        fcntl.fcntl(proc.stdout.fileno(), fcntl.F_SETFL, fl | os.O_NONBLOCK)
+
+        last_out  = time.time()
+        deadline  = time.time() + timeout
+        stalled   = False
+
+        stdscr.nodelay(True)
+        try:
+            while proc.poll() is None:
+                try:
+                    raw = proc.stdout.read(4096)
+                    if raw:
+                        for ln in raw.decode("utf-8", errors="replace").splitlines():
+                            if ln.strip():
+                                lines.append(f"  {ln}")
+                        last_out = time.time()
+                except (BlockingIOError, TypeError):
+                    pass
+                draw(f" {phase_name}...")
+                # Stall detection: tmshutdown colgado → tmipcrm
+                if stall_cmd and not stalled and time.time() - last_out > STALL:
+                    stalled = True
+                    lines.append(f"  ! Sin respuesta {STALL}s — ejecutando: {stall_cmd}")
+                    draw(f" {stall_cmd}...")
+                    try: proc.kill()
+                    except Exception: pass
+                    r_ipc = subprocess.run(
+                        ssh_cmd_base(ip, user, port) + [
+                            f'cd "{path_prod}" && . ./env.pro && {stall_cmd}'
+                        ],
+                        capture_output=True, text=True, timeout=30, env=ssh_env,
+                    )
+                    for ln in (r_ipc.stdout + r_ipc.stderr).splitlines():
+                        if ln.strip():
+                            lines.append(f"  {ln}")
+                    break
+                if time.time() > deadline:
+                    lines.append(f"  [!] Timeout ({timeout}s) — continuando...")
+                    try: proc.kill()
+                    except Exception: pass
+                    break
+                time.sleep(0.1)
+            try:
+                rest = proc.stdout.read()
+                if rest:
+                    for ln in rest.decode("utf-8", errors="replace").splitlines():
+                        if ln.strip():
+                            lines.append(f"  {ln}")
+            except Exception:
+                pass
+        finally:
+            try: proc.kill()
+            except Exception: pass
+            try: proc.wait(timeout=3)
+            except Exception: pass
+            stdscr.nodelay(False)
+
+    run_phase("tmshutdown -y",         "TMSHUTDOWN", timeout=180, stall_cmd="tmipcrm -y")
+    run_phase(f"dmloadcf -y {dm_name}", "DMLOADCF",  timeout=60)
+    run_phase("tmboot -y",             "TMBOOT",     timeout=180)
+
+    phase_txt[0] = "COMPLETADO"
+    lines.append("")
+    lines.append(f"  ✓ DM {dm_name} cargado.")
+    h2, w2 = stdscr.getmaxyx()
+    draw("")
+    stdscr.attron(curses.color_pair(C_OK) | curses.A_BOLD)
+    try:
+        stdscr.addstr(h2-1, 0,
+                      f" ✓ DM {dm_name} cargado — Enter para volver"[:w2-1].ljust(w2-1))
+    except curses.error:
+        pass
+    stdscr.attroff(curses.color_pair(C_OK) | curses.A_BOLD)
+    stdscr.refresh()
+    while True:
+        k = stdscr.getch()
+        if k in (curses.KEY_ENTER, 10, 13, ord('q'), ord('Q'), 27):
+            break
+
+
 # ── Vistas COBOL (LIBAXS) ──────────────────────────────────────────────────
 
 def detect_copy_views(grep_output, path_hades):
@@ -2024,7 +2152,7 @@ def run_deploy(stdscr, row, cbl_file):
 
         # Footer
         if done and not error:
-            footer = " ✓ Deploy completado!  Presiona Enter para volver "
+            footer = " ✓ Deploy completado!  [D]=Cargar DM  Enter=Volver "
             stdscr.attron(curses.color_pair(C_OK) | curses.A_BOLD)
         elif error:
             footer = " ✗ Error en deploy  Presiona Enter para volver "
@@ -2196,11 +2324,21 @@ def run_deploy(stdscr, row, cbl_file):
 
     redraw(done=True, error=error)
 
-    # Esperar Enter para volver
+    # Esperar Enter (o D para cargar DM) para volver
     stdscr.nodelay(False)
     while True:
         key = stdscr.getch()
         if key in (curses.KEY_ENTER, 10, 13, ord('q'), ord('Q'), 27):
+            break
+        elif key in (ord('d'), ord('D')) and not error:
+            iniciales  = row.get("iniciales", "").strip()
+            dm_default = f"DM{iniciales}" if iniciales else "DM"
+            dm_name    = (ask_input(stdscr, f"Nombre del DM [{dm_default}]: ") or "").strip()
+            init_colors(); stdscr.keypad(True)
+            if not dm_name:
+                dm_name = dm_default
+            _run_dm_load(stdscr, ip, user, password, port, path_prod, dm_name, ssh_env)
+            init_colors(); stdscr.keypad(True)
             break
 
 
