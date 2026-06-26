@@ -2448,7 +2448,7 @@ def draw_footer(stdscr, msg="", mode=""):
             right = f"  {msg} " if msg else ""
             line  = left + right.rjust(w - 1 - len(left))
     else:
-        footer = " Enter=Acción  1-8=Tab  ESC=Borrar búsqueda  e=Email  q=Salir "
+        footer = " Enter=Acción  1-8=Tab  ESC=Borrar búsqueda  Ctrl+E=Email  q=Salir "
         line   = f" {msg} " if msg else footer
 
     stdscr.attron(curses.color_pair(C_STATUS))
@@ -3140,8 +3140,8 @@ def main(stdscr):
                 stdscr.touchwin(); stdscr.refresh()
                 init_colors(); stdscr.keypad(True); stdscr.timeout(100)
 
-        # ── Configurar email ───────────────────────────────────────────────
-        elif key in (ord('e'), ord('E')) and not searching:
+        # ── Configurar email (Ctrl+E) ──────────────────────────────────────
+        elif key == 5:
             email_cfg = _wizard_email_config(stdscr, existing=cfg)
             if email_cfg:
                 cfg.update(email_cfg)
