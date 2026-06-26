@@ -3293,21 +3293,27 @@ def _genesis_draw_header(stdscr, mode):
     stdscr.addstr(0, max(0, (w - len(title)) // 2), title)
     stdscr.attroff(curses.color_pair(C_HEADER) | curses.A_BOLD)
 
-    tabs_line = "  ".join(
-        f"[{n}] {label}" for n, label, m in GENESIS_TABS
-    )
+    # Dibujar fondo de la fila de tabs
     stdscr.attron(curses.color_pair(C_TITLE))
-    stdscr.addstr(2, 0, (" " + tabs_line).ljust(w - 1))
+    stdscr.addstr(2, 0, " " * (w - 1))
     stdscr.attroff(curses.color_pair(C_TITLE))
 
-    # Resaltar tab activo
-    x = 3
+    # Dibujar cada tab individualmente con su color
+    x = 1
     for n, label, m in GENESIS_TABS:
         seg = f"[{n}] {label}"
         if m == mode:
             stdscr.attron(curses.color_pair(C_SELECTED) | curses.A_BOLD)
+        else:
+            stdscr.attron(curses.color_pair(C_TITLE))
+        try:
             stdscr.addstr(2, x, seg)
+        except curses.error:
+            pass
+        if m == mode:
             stdscr.attroff(curses.color_pair(C_SELECTED) | curses.A_BOLD)
+        else:
+            stdscr.attroff(curses.color_pair(C_TITLE))
         x += len(seg) + 2
 
 
