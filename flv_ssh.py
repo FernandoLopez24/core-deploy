@@ -2313,7 +2313,7 @@ def run_deploy(stdscr, row, cbl_file):
 
     service    = cbl_file.rsplit(".", 1)[0]          # sin extensión
     int_file   = service + ".int"
-    date_str   = time.strftime("%Y%m%d")
+    date_str   = time.strftime("%Y%m%d_%H%M%S")
     backup_name = f"{int_file}.{date_str}"
     local_tmp  = f"/tmp/flv_deploy_{int_file}"
 
