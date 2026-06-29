@@ -3301,6 +3301,86 @@ def deploy_when_picker(stdscr, titulo=""):
             return options[current][0]
 
 
+def _show_programado_detalle(stdscr, dep):
+    """Muestra el detalle/log de un deploy programado a pantalla completa."""
+    svcs = dep.get("servicios", [])
+    if svcs and svcs[0] == "__reinicio__":
+        extras = [s.split(":", 1)[1] for s in svcs if s.startswith(("__ubb__:", "__dm__:"))]
+        tipo = "⟳ REINICIO" + (f"  +{', '.join(extras)}" if extras else "")
+    else:
+        clean = [s for s in svcs if not s.startswith("__")]
+        meta  = [s.split(":", 1)[1] for s in svcs if s.startswith("__dm__:")]
+        tipo  = ", ".join(clean) + (f"  +DM:{meta[0]}" if meta else "")
+
+    fh     = dep["fecha_hora"].strftime("%d/%m/%Y %H:%M") \
+             if hasattr(dep["fecha_hora"], "strftime") else str(dep["fecha_hora"])[:16]
+    est    = dep.get("estado", "").upper()
+    detalle = dep.get("detalle") or "(sin detalle)"
+    lines  = detalle.splitlines()
+    offset = 0
+
+    while True:
+        h, w = stdscr.getmaxyx()
+        stdscr.erase()
+
+        # Header
+        stdscr.attron(curses.color_pair(C_HEADER) | curses.A_BOLD)
+        try:
+            stdscr.addstr(0, 0,
+                f" {dep['desc_cliente']}  —  {tipo}  —  {fh}  —  {est} "[:w-1].ljust(w-1))
+        except curses.error:
+            pass
+        stdscr.attroff(curses.color_pair(C_HEADER) | curses.A_BOLD)
+
+        try:
+            stdscr.addstr(1, 0, "─" * (w - 1), curses.color_pair(C_DIM))
+        except curses.error:
+            pass
+
+        log_h   = h - 4
+        visible = lines[offset: offset + log_h]
+        for i, ln in enumerate(visible):
+            attr = curses.color_pair(C_NORMAL)
+            if ln.startswith("✓") or "completado" in ln.lower():
+                attr = curses.color_pair(C_OK)
+            elif ln.startswith("✗") or "error" in ln.lower():
+                attr = curses.color_pair(C_ERROR)
+            elif ln.startswith("  [!]") or "forzad" in ln.lower():
+                attr = curses.color_pair(C_WARN)
+            elif ln.startswith("▶") or ln.startswith("  $"):
+                attr = curses.color_pair(C_TITLE)
+            try:
+                stdscr.addstr(2 + i, 0, ln[:w-1], attr)
+            except curses.error:
+                pass
+
+        pct = f"{offset+1}-{min(offset+log_h, len(lines))}/{len(lines)}" if lines else "0/0"
+        stdscr.attron(curses.color_pair(C_STATUS))
+        try:
+            stdscr.addstr(h-1, 0,
+                f" ↑↓/PgUp/PgDn=Scroll  q/ESC/Enter=Volver  [{pct} líneas] "[:w-1].ljust(w-1))
+        except curses.error:
+            pass
+        stdscr.attroff(curses.color_pair(C_STATUS))
+        stdscr.refresh()
+
+        k = stdscr.getch()
+        if k in (ord('q'), ord('Q'), 27, curses.KEY_ENTER, 10, 13):
+            break
+        elif k == curses.KEY_UP:
+            offset = max(0, offset - 1)
+        elif k == curses.KEY_DOWN:
+            offset = min(max(0, len(lines) - log_h), offset + 1)
+        elif k == curses.KEY_PPAGE:
+            offset = max(0, offset - log_h)
+        elif k == curses.KEY_NPAGE:
+            offset = min(max(0, len(lines) - log_h), offset + log_h)
+        elif k == curses.KEY_HOME:
+            offset = 0
+        elif k == curses.KEY_END:
+            offset = max(0, len(lines) - log_h)
+
+
 def draw_programados(stdscr, rows, selected, offset):
     """Dibuja la lista de deploys/reinicios programados del usuario."""
     h, w   = stdscr.getmaxyx()
@@ -5103,7 +5183,9 @@ def cobol_main(stdscr, usuario):
                 needs_reload = True
 
             elif mode == "programados":
-                pass  # Enter no hace nada en programados
+                if row:
+                    _show_programado_detalle(stdscr, row)
+                    init_colors(); stdscr.keypad(True); stdscr.timeout(100)
 
             elif mode == "reinicio":
                 if not row.get("path"):
