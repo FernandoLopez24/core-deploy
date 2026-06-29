@@ -1157,6 +1157,10 @@ def _run_scheduled_reinicio(deploy):
             pass
         return force_used, "".join(out)
 
+    svcs     = deploy.get("servicios", [])
+    ubb_name = next((s.split(":", 1)[1] for s in svcs if s.startswith("__ubb__:")), None)
+    dm_name  = next((s.split(":", 1)[1] for s in svcs if s.startswith("__dm__:")),  None)
+
     logs = []
     force, out = run_cmd("tmshutdown -y")
     logs.append(f"tmshutdown:\n{out.strip()}")
@@ -1167,6 +1171,12 @@ def _run_scheduled_reinicio(deploy):
     if force or shutdown_failed:
         _, out2 = run_cmd("tmipcrm -y")
         logs.append(f"tmipcrm:\n{out2.strip()}")
+    if ubb_name:
+        _, out_ubb = run_cmd(f"tmloadcf -y {ubb_name}")
+        logs.append(f"tmloadcf ({ubb_name}):\n{out_ubb.strip()}")
+    if dm_name:
+        _, out_dm = run_cmd(f"dmloadcf -y {dm_name}")
+        logs.append(f"dmloadcf ({dm_name}):\n{out_dm.strip()}")
     _, out3 = run_cmd("tmboot -y")
     logs.append(f"tmboot:\n{out3.strip()}")
 
@@ -1276,11 +1286,12 @@ def _run_scheduled_deploy(deploy):
     if deploy["servicios"] == ["__genesis_reinicio__"]:
         _run_scheduled_genesis_reinicio_headless(deploy["desc_cliente"])
         return
-    if deploy["servicios"] == ["__reinicio__"]:
+    if deploy["servicios"] and deploy["servicios"][0] == "__reinicio__":
         _run_scheduled_reinicio(deploy)
         return
 
-    servicios = deploy["servicios"]
+    dm_name   = next((s.split(":", 1)[1] for s in deploy["servicios"] if s.startswith("__dm__:")), None)
+    servicios = [s for s in deploy["servicios"] if not s.startswith("__")]
     row = {
         "ip":           deploy["ip"],
         "ssh_user":     deploy["ssh_user"],
@@ -1305,6 +1316,61 @@ def _run_scheduled_deploy(deploy):
         ok, detalle = _deploy_one_silent(row, cbl, build_content, lambda m: None)
         resultados.append(f"{'✓' if ok else '✗'} {cbl}: {detalle}")
 
+    # ── DM headless (tmshutdown → dmloadcf → tmboot) ────────────────────────
+    if dm_name and not any(r.startswith("✗") for r in resultados):
+        try:
+            ip       = str(row["ip"]).split("/")[0].strip()
+            ssh_env  = _sshenv(row["ssh_password"])
+            path     = row["path"]
+            STALL    = 30
+
+            def _run_cmd_silent(cmd_str):
+                ssh = ssh_cmd_base(ip, row["ssh_user"], row["ssh_port"])
+                ssh.insert(3, "-tt")
+                ssh.append(f'cd "{path}" && . ./env.pro && {cmd_str}')
+                proc = subprocess.Popen(ssh, stdin=subprocess.PIPE,
+                                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                        bufsize=0, env=ssh_env)
+                fl = fcntl.fcntl(proc.stdout.fileno(), fcntl.F_GETFL)
+                fcntl.fcntl(proc.stdout.fileno(), fcntl.F_SETFL, fl | os.O_NONBLOCK)
+                out = []; last_out = time.time(); force = False
+                while proc.poll() is None:
+                    try:
+                        raw = proc.stdout.read(4096)
+                        if raw:
+                            out.append(raw.decode("utf-8", errors="replace"))
+                            last_out = time.time()
+                    except (BlockingIOError, TypeError):
+                        pass
+                    if time.time() - last_out > STALL:
+                        force = True
+                        try:
+                            proc.stdin.write(b'\x03'); proc.stdin.flush()
+                            time.sleep(0.4)
+                            proc.stdin.write(b'y\n');  proc.stdin.flush()
+                        except Exception:
+                            pass
+                        last_out = time.time()
+                    time.sleep(0.1)
+                try:
+                    rest = proc.stdout.read()
+                    if rest: out.append(rest.decode("utf-8", errors="replace"))
+                except Exception:
+                    pass
+                try: proc.kill()
+                except Exception: pass
+                return force, "".join(out)
+
+            force_sd, out_sd = _run_cmd_silent("tmshutdown -y")
+            sd_failed = "Shutdown failed" in out_sd or "Cannot shutdown BBL" in out_sd
+            if force_sd or sd_failed:
+                _run_cmd_silent("tmipcrm -y")
+            _run_cmd_silent(f"dmloadcf -y {dm_name}")
+            _run_cmd_silent("tmboot -y")
+            resultados.append(f"✓ DM {dm_name}: cargado y módulo reiniciado")
+        except Exception as e:
+            resultados.append(f"✗ DM {dm_name}: {e}")
+
     errores  = sum(1 for r in resultados if r.startswith("✗"))
     estado   = "error" if errores else "ok"
     detalle  = "\n".join(resultados)
@@ -1314,7 +1380,7 @@ def _run_scheduled_deploy(deploy):
     fh  = deploy.get("fecha_hora")
     fh_str  = fh.strftime("%d/%m/%Y %H:%M") if hasattr(fh, "strftime") else str(fh)[:16]
     icono   = "✓" if estado == "ok" else "✗"
-    svcs_str = ", ".join(servicios)
+    svcs_str = ", ".join(servicios) + (f" + DM:{dm_name}" if dm_name else "")
     subject = f"[core-deploy] {icono} Deploy — {deploy['desc_cliente']} — {svcs_str} ({fh_str})"
     body = (
         f"Deploy {'completado' if estado == 'ok' else 'con errores'}.\n"
@@ -2294,14 +2360,10 @@ def deploy_view_files(stdscr, views, path_hades_resolved, libpath, maquinas, had
             break
 
 
-def run_deploy(stdscr, row, cbl_file):
+def run_deploy(stdscr, row, cbl_file, pre_options=None):
     """
-    Pipeline completo de deploy COBOL:
-      1. Compilar en hades:  cd path_hades && cob Servicio.cbl
-      2. Descargar .int de hades → /tmp/
-      3. Backup en producción: Servicio.int → Servicio.int.YYYYMMDD
-      4. Subir .int a producción
-      5. Build en producción: . ./env.pro && make -f build.server todoXX
+    Pipeline completo de deploy COBOL.
+    pre_options: (carry_views, dm_name) ya calculados; si None se muestra el dialog.
     """
     ip         = row["ip"]
     user       = row["ssh_user"]
@@ -2429,11 +2491,9 @@ def run_deploy(stdscr, row, cbl_file):
     # ── Pantalla única: opciones de deploy ────────────────────────────────
     iniciales  = row.get("iniciales", "").strip()
     dm_default = f"DM{iniciales}" if iniciales else "DM"
-    carry_views = False
-    dm_name     = None
-
-    # Solo mostrar la pantalla si hay algo que preguntar
-    if views or True:   # siempre preguntar DM
+    if pre_options is not None:
+        carry_views, dm_name = pre_options
+    else:
         carry_views, dm_name = _deploy_options_dialog(
             stdscr, views, dm_default, cbl_file
         )
@@ -3250,7 +3310,13 @@ def draw_programados(stdscr, rows, selected, offset):
         y     = 5 + i
         abs_i = offset + i
         svcs  = dep["servicios"]
-        tipo  = "⟳ REINICIO" if svcs == ["__reinicio__"] else ", ".join(svcs)
+        if svcs and svcs[0] == "__reinicio__":
+            extras = [s.split(":", 1)[1] for s in svcs if s.startswith(("__ubb__:", "__dm__:"))]
+            tipo = "⟳ REINICIO" + (f" +{','.join(extras)}" if extras else "")
+        else:
+            clean = [s for s in svcs if not s.startswith("__")]
+            meta  = [s.split(":", 1)[1] for s in svcs if s.startswith("__dm__:")]
+            tipo  = ", ".join(clean) + (f" +DM:{meta[0]}" if meta else "")
         fh    = dep["fecha_hora"].strftime("%d/%m/%Y %H:%M") \
                 if hasattr(dep["fecha_hora"], "strftime") else str(dep["fecha_hora"])[:16]
         est   = dep["estado"]
@@ -3592,12 +3658,20 @@ def reinicio_tuxedo(stdscr, row, usuario="", ubb_name=None, dm_name=None):
     if when == "schedule":
         fh = ask_datetime(stdscr)
         if fh:
+            svcs = ["__reinicio__"]
+            if ubb_name:
+                svcs.append(f"__ubb__:{ubb_name}")
+            if dm_name:
+                svcs.append(f"__dm__:{dm_name}")
             db_insert_deploy_programado(
-                usuario, row["nro_cliente"], nombre,
-                ["__reinicio__"], fh,
+                usuario, row["nro_cliente"], nombre, svcs, fh,
             )
             notify_scheduler()
-            _show_message(stdscr, f"✓ Reinicio programado para {fh.strftime('%d/%m/%Y %H:%M')}")
+            extras = []
+            if ubb_name: extras.append(f"UBB:{ubb_name}")
+            if dm_name:  extras.append(f"DM:{dm_name}")
+            sufijo = f" + {', '.join(extras)}" if extras else ""
+            _show_message(stdscr, f"✓ Reinicio{sufijo} programado para {fh.strftime('%d/%m/%Y %H:%M')}")
         return
 
     STALL_SECS = 30
@@ -4880,18 +4954,52 @@ def cobol_main(stdscr, usuario):
                     continue
                 cbl = cbl_picker(stdscr, row)
                 if cbl:
+                    # ── Detectar vistas y pedir opciones antes de elegir cuándo ──
+                    _libpath_d  = row.get("libpath", "").strip()
+                    _ph_d       = _resolve_hades_path(row.get("path_hades", ""))
+                    _henv_d     = _sshenv(HADES.get("password", ""))
+                    _iniciales_d = row.get("iniciales", "").strip()
+                    _dm_def_d   = f"DM{_iniciales_d}" if _iniciales_d else "DM"
+                    _views_d    = []
+                    if _libpath_d and _ph_d:
+                        try:
+                            _gr_d = subprocess.run(
+                                hades_cmd_base() + [
+                                    f"grep -Hi 'copy.*\\.var' \"{_ph_d}/{cbl}\" 2>/dev/null || true"
+                                ],
+                                capture_output=True, text=True, timeout=15, env=_henv_d,
+                            )
+                            _views_d = detect_copy_views(_gr_d.stdout, _ph_d)
+                        except Exception:
+                            _views_d = []
+                    _carry_d, _dm_d = _deploy_options_dialog(stdscr, _views_d, _dm_def_d, cbl)
+                    init_colors(); stdscr.keypad(True)
+
                     when = deploy_when_picker(stdscr, f"DEPLOY — {row['desc_cliente']} — {cbl}")
                     if when == "now":
-                        run_deploy(stdscr, row, cbl)
+                        if _carry_d and _libpath_d:
+                            _all_maqs_d = fetch_maquinas(sistema="cobol")
+                            _sel_maqs_d = multiselect_maquinas_dialog(
+                                stdscr, _all_maqs_d, title="Servidores destino para vistas")
+                            init_colors(); stdscr.keypad(True)
+                            if _sel_maqs_d:
+                                deploy_view_files(stdscr, _carry_d, _ph_d, _libpath_d,
+                                                  _sel_maqs_d, _henv_d)
+                            init_colors(); stdscr.keypad(True)
+                        run_deploy(stdscr, row, cbl, pre_options=([], _dm_d))
                     elif when == "schedule":
                         fh = ask_datetime(stdscr)
                         if fh:
+                            svcs_d = [cbl]
+                            if _dm_d:
+                                svcs_d.append(f"__dm__:{_dm_d}")
                             db_insert_deploy_programado(
                                 usuario, row["nro_cliente"], row["desc_cliente"],
-                                [cbl], fh,
+                                svcs_d, fh,
                             )
                             notify_scheduler()
-                            status = f"✓ Deploy de {cbl} programado para {fh.strftime('%d/%m/%Y %H:%M')}"
+                            sufijo_d = f" + DM:{_dm_d}" if _dm_d else ""
+                            status = f"✓ Deploy de {cbl}{sufijo_d} programado para {fh.strftime('%d/%m/%Y %H:%M')}"
                 init_colors(); stdscr.keypad(True); stdscr.timeout(100)
                 needs_reload = True
 
@@ -4904,35 +5012,32 @@ def cobol_main(stdscr, usuario):
                     continue
                 cbl_list = multicbl_picker(stdscr, row)
                 if cbl_list:
+                    # ── Detectar vistas y pedir opciones antes de elegir cuándo ──
+                    _libpath   = row.get("libpath", "").strip()
+                    _ph        = _resolve_hades_path(row.get("path_hades", ""))
+                    _henv      = _sshenv(HADES.get("password", ""))
+                    _iniciales = row.get("iniciales", "").strip()
+                    _dm_def    = f"DM{_iniciales}" if _iniciales else "DM"
+                    _views     = []
+                    if _libpath and _ph:
+                        try:
+                            _files_arg = " ".join(f'"{_ph}/{f}"' for f in cbl_list)
+                            _gr = subprocess.run(
+                                hades_cmd_base() + [
+                                    f"grep -Hi 'copy.*\\.var' {_files_arg} 2>/dev/null || true"
+                                ],
+                                capture_output=True, text=True, timeout=15, env=_henv,
+                            )
+                            _views = detect_copy_views(_gr.stdout, _ph)
+                        except Exception:
+                            _views = []
+                    _carry_views, _dm_name = _deploy_options_dialog(
+                        stdscr, _views, _dm_def, f"{len(cbl_list)} archivos",
+                    )
+                    init_colors(); stdscr.keypad(True)
+
                     when = deploy_when_picker(stdscr, f"MULTI-DEPLOY — {row['desc_cliente']}")
                     if when == "now":
-                        # ── Detectar vistas en todos los .cbl seleccionados ──
-                        _libpath   = row.get("libpath", "").strip()
-                        _ph        = _resolve_hades_path(row.get("path_hades", ""))
-                        _henv      = _sshenv(HADES.get("password", ""))
-                        _iniciales = row.get("iniciales", "").strip()
-                        _dm_def    = f"DM{_iniciales}" if _iniciales else "DM"
-                        _views     = []
-                        if _libpath and _ph:
-                            try:
-                                _files_arg = " ".join(
-                                    f'"{_ph}/{f}"' for f in cbl_list
-                                )
-                                _gr = subprocess.run(
-                                    hades_cmd_base() + [
-                                        f"grep -Hi 'copy.*\\.var' {_files_arg} 2>/dev/null || true"
-                                    ],
-                                    capture_output=True, text=True,
-                                    timeout=15, env=_henv,
-                                )
-                                _views = detect_copy_views(_gr.stdout, _ph)
-                            except Exception:
-                                _views = []
-                        _carry_views, _dm_name = _deploy_options_dialog(
-                            stdscr, _views, _dm_def,
-                            f"{len(cbl_list)} archivos",
-                        )
-                        init_colors(); stdscr.keypad(True)
                         if _carry_views and _libpath:
                             _all_maqs = fetch_maquinas(sistema="cobol")
                             _sel_maqs = multiselect_maquinas_dialog(
@@ -4952,12 +5057,14 @@ def cobol_main(stdscr, usuario):
                     elif when == "schedule":
                         fh = ask_datetime(stdscr)
                         if fh:
+                            svcs_m = cbl_list + ([f"__dm__:{_dm_name}"] if _dm_name else [])
                             db_insert_deploy_programado(
                                 usuario, row["nro_cliente"], row["desc_cliente"],
-                                cbl_list, fh,
+                                svcs_m, fh,
                             )
                             notify_scheduler()
-                            status = f"✓ {len(cbl_list)} servicio(s) programados para {fh.strftime('%d/%m/%Y %H:%M')}"
+                            sufijo_m = f" + DM:{_dm_name}" if _dm_name else ""
+                            status = f"✓ {len(cbl_list)} servicio(s){sufijo_m} programados para {fh.strftime('%d/%m/%Y %H:%M')}"
                 init_colors(); stdscr.keypad(True); stdscr.timeout(100)
                 needs_reload = True
 
