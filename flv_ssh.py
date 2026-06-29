@@ -2294,8 +2294,6 @@ def _deploy_hilos_streaming(stdscr, ip, user, password, port, path_prod,
         run_cmd(f"tmshutdown -i {i} -w 5")
         time.sleep(2)
         run_cmd(f"tmboot -i {i}")
-        time.sleep(2)
-        run_cmd(f"tmboot -i {i}")
         lines.append(f"  ✓ Instancia {i} reiniciada")
         draw_cb()
 
@@ -2328,8 +2326,6 @@ def _deploy_hilos_silent(ip, user, password, port, path_prod,
 
     for i in ids:
         run_cmd(f"tmshutdown -i {i} -w 5")
-        time.sleep(2)
-        run_cmd(f"tmboot -i {i}")
         time.sleep(2)
         run_cmd(f"tmboot -i {i}")
         log_cb(f"  ✓ Instancia {i} reiniciada")
