@@ -2701,7 +2701,7 @@ def _deploy_one_silent(row, cbl_file, build_content, log_cb):
 
     service     = cbl_file.rsplit(".", 1)[0]
     int_file    = service + ".int"
-    date_str    = time.strftime("%Y%m%d")
+    date_str    = time.strftime("%Y%m%d_%H%M%S")
     backup_name = f"{int_file}.{date_str}"
     local_tmp   = f"/tmp/flv_mdeploy_{int_file}"
 
