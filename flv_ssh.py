@@ -3306,9 +3306,22 @@ def draw_programados(stdscr, rows, selected, offset):
     h, w   = stdscr.getmaxyx()
     list_h = h - 6
 
-    header = f"  {'CLIENTE':<22}  {'TIPO/SERVICIOS':<25}  {'FECHA/HORA':<17}  {'ESTADO'}"
+    # Anchos de columna adaptados al ancho de terminal
+    C_CLI  = max(20, min(28, w // 4))
+    C_TIPO = max(30, min(45, w // 3))
+    C_FH   = 16
+    # ESTADO ocupa el resto
+
+    def _trunc(s, n):
+        return s if len(s) <= n else s[:n - 1] + "…"
+
+    header = (f"  {'CLIENTE':<{C_CLI}}  {'TIPO / SERVICIOS':<{C_TIPO}}"
+              f"  {'FECHA/HORA':<{C_FH}}  ESTADO")
     stdscr.attron(curses.color_pair(C_TITLE) | curses.A_BOLD)
-    stdscr.addstr(4, 0, header[:w - 1].ljust(w - 1))
+    try:
+        stdscr.addstr(4, 0, header[:w - 1].ljust(w - 1))
+    except curses.error:
+        pass
     stdscr.attroff(curses.color_pair(C_TITLE) | curses.A_BOLD)
 
     ESTADO_COLOR = {
@@ -3325,23 +3338,31 @@ def draw_programados(stdscr, rows, selected, offset):
         svcs  = dep["servicios"]
         if svcs and svcs[0] == "__reinicio__":
             extras = [s.split(":", 1)[1] for s in svcs if s.startswith(("__ubb__:", "__dm__:"))]
-            tipo = "⟳ REINICIO" + (f" +{','.join(extras)}" if extras else "")
+            tipo = "⟳ REINICIO" + (f"  +{', '.join(extras)}" if extras else "")
         else:
             clean = [s for s in svcs if not s.startswith("__")]
             meta  = [s.split(":", 1)[1] for s in svcs if s.startswith("__dm__:")]
-            tipo  = ", ".join(clean) + (f" +DM:{meta[0]}" if meta else "")
+            tipo  = ", ".join(clean) + (f"  +DM:{meta[0]}" if meta else "")
         fh    = dep["fecha_hora"].strftime("%d/%m/%Y %H:%M") \
                 if hasattr(dep["fecha_hora"], "strftime") else str(dep["fecha_hora"])[:16]
         est   = dep["estado"]
         color = ESTADO_COLOR.get(est, C_NORMAL)
-        line  = f"  {dep['desc_cliente']:<22}  {tipo:<25}  {fh:<17}  {est.upper()}"
+        cli   = _trunc(dep["desc_cliente"], C_CLI)
+        tip   = _trunc(tipo, C_TIPO)
+        line  = f"  {cli:<{C_CLI}}  {tip:<{C_TIPO}}  {fh:<{C_FH}}  {est.upper()}"
         if abs_i == selected:
             stdscr.attron(curses.color_pair(C_SELECTED) | curses.A_BOLD)
-            stdscr.addstr(y, 0, line[:w - 1].ljust(w - 1))
+            try:
+                stdscr.addstr(y, 0, line[:w - 1].ljust(w - 1))
+            except curses.error:
+                pass
             stdscr.attroff(curses.color_pair(C_SELECTED) | curses.A_BOLD)
         else:
             stdscr.attron(curses.color_pair(color))
-            stdscr.addstr(y, 0, line[:w - 1])
+            try:
+                stdscr.addstr(y, 0, line[:w - 1])
+            except curses.error:
+                pass
             stdscr.attroff(curses.color_pair(color))
 
     for i in range(len(visible), list_h):
