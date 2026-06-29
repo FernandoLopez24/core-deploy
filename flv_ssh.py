@@ -5245,7 +5245,7 @@ def cobol_main(stdscr, usuario):
                     _iniciales_d = row.get("iniciales", "").strip()
                     _dm_def_d   = f"DM{_iniciales_d}" if _iniciales_d else "DM"
                     _views_d    = []
-                    if _libpath_d and _ph_d:
+                    if _ph_d:
                         try:
                             _gr_d = subprocess.run(
                                 hades_cmd_base() + [
@@ -5261,14 +5261,18 @@ def cobol_main(stdscr, usuario):
 
                     when = deploy_when_picker(stdscr, f"DEPLOY — {row['desc_cliente']} — {cbl}")
                     if when == "now":
-                        if _carry_d and _libpath_d:
-                            _all_maqs_d = fetch_maquinas(sistema="cobol")
-                            _sel_maqs_d = multiselect_maquinas_dialog(
-                                stdscr, _all_maqs_d, title="Servidores destino para vistas")
-                            init_colors(); stdscr.keypad(True)
-                            if _sel_maqs_d:
-                                deploy_view_files(stdscr, _carry_d, _ph_d, _libpath_d,
-                                                  _sel_maqs_d, _henv_d)
+                        if _carry_d:
+                            if not _libpath_d:
+                                _show_message(stdscr,
+                                    "Sin libpath configurado — no se pueden copiar vistas", error=True)
+                            else:
+                                _all_maqs_d = fetch_maquinas(sistema="cobol")
+                                _sel_maqs_d = multiselect_maquinas_dialog(
+                                    stdscr, _all_maqs_d, title="Servidores destino para vistas")
+                                init_colors(); stdscr.keypad(True)
+                                if _sel_maqs_d:
+                                    deploy_view_files(stdscr, _carry_d, _ph_d, _libpath_d,
+                                                      _sel_maqs_d, _henv_d)
                             init_colors(); stdscr.keypad(True)
                         run_deploy(stdscr, row, cbl, pre_options=([], _dm_d, _hilos_d))
                     elif when == "schedule":
@@ -5307,7 +5311,7 @@ def cobol_main(stdscr, usuario):
                     _iniciales = row.get("iniciales", "").strip()
                     _dm_def    = f"DM{_iniciales}" if _iniciales else "DM"
                     _views     = []
-                    if _libpath and _ph:
+                    if _ph:
                         try:
                             _files_arg = " ".join(f'"{_ph}/{f}"' for f in cbl_list)
                             _gr = subprocess.run(
@@ -5326,14 +5330,18 @@ def cobol_main(stdscr, usuario):
 
                     when = deploy_when_picker(stdscr, f"MULTI-DEPLOY — {row['desc_cliente']}")
                     if when == "now":
-                        if _carry_views and _libpath:
-                            _all_maqs = fetch_maquinas(sistema="cobol")
-                            _sel_maqs = multiselect_maquinas_dialog(
-                                stdscr, _all_maqs, title="Servidores destino para vistas")
-                            init_colors(); stdscr.keypad(True)
-                            if _sel_maqs:
-                                deploy_view_files(stdscr, _carry_views, _ph, _libpath,
-                                                  _sel_maqs, _henv)
+                        if _carry_views:
+                            if not _libpath:
+                                _show_message(stdscr,
+                                    "Sin libpath configurado — no se pueden copiar vistas", error=True)
+                            else:
+                                _all_maqs = fetch_maquinas(sistema="cobol")
+                                _sel_maqs = multiselect_maquinas_dialog(
+                                    stdscr, _all_maqs, title="Servidores destino para vistas")
+                                init_colors(); stdscr.keypad(True)
+                                if _sel_maqs:
+                                    deploy_view_files(stdscr, _carry_views, _ph, _libpath,
+                                                      _sel_maqs, _henv)
                             init_colors(); stdscr.keypad(True)
                         run_multi_deploy(stdscr, row, cbl_list, use_hilos=_hilos_m)
                         if _dm_name and row.get("path"):
