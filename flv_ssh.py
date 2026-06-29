@@ -1293,6 +1293,7 @@ def _run_scheduled_deploy(deploy):
         return
 
     dm_name   = next((s.split(":", 1)[1] for s in deploy["servicios"] if s.startswith("__dm__:")), None)
+    use_hilos = "__hilos__" in deploy["servicios"]
     servicios = [s for s in deploy["servicios"] if not s.startswith("__")]
     row = {
         "ip":           deploy["ip"],
@@ -1315,7 +1316,8 @@ def _run_scheduled_deploy(deploy):
     build_content = r_bs.stdout
 
     for cbl in servicios:
-        ok, detalle = _deploy_one_silent(row, cbl, build_content, lambda m: None)
+        ok, detalle = _deploy_one_silent(row, cbl, build_content, lambda m: None,
+                                         use_hilos=use_hilos)
         resultados.append(f"{'✓' if ok else '✗'} {cbl}: {detalle}")
 
     # ── DM headless (tmshutdown → dmloadcf → tmboot) ────────────────────────
@@ -1383,7 +1385,7 @@ def _run_scheduled_deploy(deploy):
     fh  = deploy.get("fecha_hora")
     fh_str  = fh.strftime("%d/%m/%Y %H:%M") if hasattr(fh, "strftime") else str(fh)[:16]
     icono   = "✓" if estado == "ok" else "✗"
-    svcs_str = ", ".join(servicios) + (f" + DM:{dm_name}" if dm_name else "")
+    svcs_str = ", ".join(servicios) + (f" + DM:{dm_name}" if dm_name else "") + (" +hilos" if use_hilos else "")
     subject = f"[core-deploy] {icono} Deploy — {deploy['desc_cliente']} — {svcs_str} ({fh_str})"
     body = (
         f"Deploy {'completado' if estado == 'ok' else 'con errores'}.\n"
@@ -2099,20 +2101,16 @@ def _run_dm_load(stdscr, ip, user, password, port, path_prod, dm_name, ssh_env):
 def _deploy_options_dialog(stdscr, views, dm_default, cbl_file):
     """
     Pantalla única de opciones antes del deploy.
-    Cada vista tiene su propio checkbox. DM al final.
-    Retorna (selected_views: list, dm_name: str|None).
-    selected_views = sub-lista de views [(basename, hades_path, source_cbl), ...]
+    Retorna (selected_views: list, dm_name: str|None, use_hilos: bool).
     """
-    # Estado por índice de opción
-    # Opciones: una por vista + una para DM
-    view_checked = [True] * len(views)   # todas preseleccionadas
-    opt_dm  = False
-    dm_name = dm_default
-    cursor  = 0
+    view_checked = [True] * len(views)
+    opt_dm    = False;  dm_name   = dm_default
+    opt_hilos = False
+    cursor    = 0
 
     while True:
-        h, w    = stdscr.getmaxyx()
-        n_opts  = len(views) + 1          # vistas + DM
+        h, w   = stdscr.getmaxyx()
+        n_opts = len(views) + 2   # vistas + DM + Hilos
         stdscr.erase()
 
         stdscr.attron(curses.color_pair(C_HEADER) | curses.A_BOLD)
@@ -2124,14 +2122,11 @@ def _deploy_options_dialog(stdscr, views, dm_default, cbl_file):
 
         row_y = 2
 
-        # Una fila por vista
         for i, (base, _, src) in enumerate(views):
             mark  = "[x]" if view_checked[i] else "[ ]"
-            label = f"{base}.V"
-            if src:
-                label += f"  ({src})"
-            attr = (curses.color_pair(C_SELECTED) | curses.A_BOLD) if cursor == i \
-                   else curses.color_pair(C_NORMAL)
+            label = f"{base}.V" + (f"  ({src})" if src else "")
+            attr  = (curses.color_pair(C_SELECTED) | curses.A_BOLD) if cursor == i \
+                    else curses.color_pair(C_NORMAL)
             try:
                 stdscr.addstr(row_y, 2, f"  {mark} {label}"[:w-3], attr)
             except curses.error:
@@ -2139,13 +2134,15 @@ def _deploy_options_dialog(stdscr, views, dm_default, cbl_file):
             row_y += 1
 
         if views:
-            row_y += 1   # separador visual
+            row_y += 1
+
+        dm_idx    = len(views)
+        hilos_idx = len(views) + 1
 
         # Opción DM
-        dm_idx = len(views)
-        mark   = "[x]" if opt_dm else "[ ]"
-        attr   = (curses.color_pair(C_SELECTED) | curses.A_BOLD) if cursor == dm_idx \
-                 else curses.color_pair(C_NORMAL)
+        mark = "[x]" if opt_dm else "[ ]"
+        attr = (curses.color_pair(C_SELECTED) | curses.A_BOLD) if cursor == dm_idx \
+               else curses.color_pair(C_NORMAL)
         try:
             stdscr.addstr(row_y, 2, f"  {mark} Cargar DM y reiniciar módulo"[:w-3], attr)
         except curses.error:
@@ -2158,6 +2155,17 @@ def _deploy_options_dialog(stdscr, views, dm_default, cbl_file):
                 pass
             row_y += 1
 
+        # Opción Hilos
+        mark = "[x]" if opt_hilos else "[ ]"
+        attr = (curses.color_pair(C_SELECTED) | curses.A_BOLD) if cursor == hilos_idx \
+               else curses.color_pair(C_NORMAL)
+        try:
+            stdscr.addstr(row_y, 2,
+                f"  {mark} Deploy por Hilos  (mantiene disponibilidad)"[:w-3], attr)
+        except curses.error:
+            pass
+        row_y += 1
+
         stdscr.attron(curses.color_pair(C_STATUS))
         try:
             stdscr.addstr(h-1, 0,
@@ -2169,7 +2177,7 @@ def _deploy_options_dialog(stdscr, views, dm_default, cbl_file):
 
         k = stdscr.getch()
         if k == 27:
-            return [], None
+            return [], None, False
         elif k == curses.KEY_UP:
             cursor = (cursor - 1) % n_opts
         elif k == curses.KEY_DOWN:
@@ -2177,14 +2185,156 @@ def _deploy_options_dialog(stdscr, views, dm_default, cbl_file):
         elif k == ord(' '):
             if cursor < len(views):
                 view_checked[cursor] = not view_checked[cursor]
-            else:
+            elif cursor == dm_idx:
                 opt_dm = not opt_dm
                 if opt_dm:
                     inp = (ask_input(stdscr, f"Nombre del DM [{dm_default}]: ") or "").strip()
                     dm_name = inp if inp else dm_default
+            else:
+                opt_hilos = not opt_hilos
         elif k in (curses.KEY_ENTER, 10, 13):
             sel = [v for v, chk in zip(views, view_checked) if chk]
-            return sel, (dm_name if opt_dm else None)
+            return sel, (dm_name if opt_dm else None), opt_hilos
+
+
+def _get_hilos_ids(ip, user, password, port, path_prod, service_name, ssh_env):
+    """
+    Dado un nombre de servicio (sin .cbl), devuelve (servidor, [ids]) encontrados en psc+ps.
+    """
+    def run(cmd):
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=20, env=ssh_env)
+        return r.stdout + r.stderr
+
+    # 1. psc → encontrar el Prog Name que corre este servicio
+    psc_out = run(ssh_cmd_base(ip, user, port) + [
+        f'cd "{path_prod}" && . ./env.pro && echo "psc" | tmadmin 2>/dev/null'
+    ])
+    servidor = None
+    for line in psc_out.splitlines():
+        parts = line.split()
+        if parts and parts[0].lower() == service_name.lower():
+            # columna Prog Name es la 3ra (índice 2)
+            if len(parts) >= 3:
+                servidor = parts[2]
+                break
+    if not servidor:
+        return None, []
+
+    # 2. ps → extraer IDs de instancias (replicando la lógica de hilachas)
+    ps_out = run(ssh_cmd_base(ip, user, port) + [
+        f'ps -fea | grep "{servidor}" | grep -v grep'
+    ])
+    ids = []
+    for line in ps_out.splitlines():
+        m = re.search(r'\s-i\s+(\d+)', line)
+        if m:
+            ids.append(int(m.group(1)))
+    ids = sorted(set(ids))
+    return servidor, ids
+
+
+def _deploy_hilos_streaming(stdscr, ip, user, password, port, path_prod,
+                             service_name, ssh_env, lines, draw_cb):
+    """
+    Reinicia instancia por instancia el servidor que corre service_name.
+    lines: deque compartido con run_deploy para streaming.
+    draw_cb: función de redibujado.
+    """
+    lines.append(f"")
+    lines.append(f"▶ Deploy por Hilos — {service_name}")
+    draw_cb()
+
+    servidor, ids = _get_hilos_ids(ip, user, password, port, path_prod,
+                                    service_name, ssh_env)
+    if not servidor:
+        lines.append(f"  ✗ No se encontró servidor en psc para '{service_name}'")
+        draw_cb()
+        return False
+
+    lines.append(f"  Servidor: {servidor}  —  {len(ids)} instancia(s): {ids}")
+    draw_cb()
+
+    def run_cmd(cmd_str):
+        ssh = ssh_cmd_base(ip, user, port)
+        ssh.insert(3, "-tt")
+        ssh.append(f'cd "{path_prod}" && . ./env.pro && {cmd_str}')
+        proc = subprocess.Popen(ssh, stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                bufsize=0, env=ssh_env)
+        fl = fcntl.fcntl(proc.stdout.fileno(), fcntl.F_GETFL)
+        fcntl.fcntl(proc.stdout.fileno(), fcntl.F_SETFL, fl | os.O_NONBLOCK)
+        out = []
+        while proc.poll() is None:
+            try:
+                raw = proc.stdout.read(4096)
+                if raw:
+                    for ln in raw.decode("utf-8", errors="replace").splitlines():
+                        if ln.strip():
+                            lines.append(f"    {ln}")
+                            out.append(ln)
+                    draw_cb()
+            except (BlockingIOError, TypeError):
+                pass
+            time.sleep(0.05)
+        try:
+            rest = proc.stdout.read()
+            if rest:
+                for ln in rest.decode("utf-8", errors="replace").splitlines():
+                    if ln.strip():
+                        lines.append(f"    {ln}")
+        except Exception:
+            pass
+        try: proc.kill()
+        except Exception: pass
+        return "\n".join(out)
+
+    for i in ids:
+        lines.append(f"  ── Instancia {i} ──")
+        draw_cb()
+        run_cmd(f"tmshutdown -i {i} -w 5")
+        time.sleep(2)
+        run_cmd(f"tmboot -i {i}")
+        time.sleep(2)
+        run_cmd(f"tmboot -i {i}")
+        lines.append(f"  ✓ Instancia {i} reiniciada")
+        draw_cb()
+
+    lines.append(f"  ✓ Deploy por Hilos completado — {len(ids)} instancia(s)")
+    draw_cb()
+    return True
+
+
+def _deploy_hilos_silent(ip, user, password, port, path_prod,
+                          service_name, ssh_env, log_cb):
+    """Versión headless de deploy por hilos para deploys programados."""
+    servidor, ids = _get_hilos_ids(ip, user, password, port, path_prod,
+                                    service_name, ssh_env)
+    if not servidor:
+        log_cb(f"  ✗ Hilos: no se encontró servidor para '{service_name}'")
+        return False
+
+    log_cb(f"  Hilos: {servidor}  {ids}")
+
+    def run_cmd(cmd_str):
+        ssh = ssh_cmd_base(ip, user, port)
+        ssh.insert(3, "-tt")
+        ssh.append(f'cd "{path_prod}" && . ./env.pro && {cmd_str}')
+        try:
+            r = subprocess.run(ssh, capture_output=True, text=True,
+                               timeout=60, env=ssh_env)
+            return r.stdout + r.stderr
+        except Exception as e:
+            return str(e)
+
+    for i in ids:
+        run_cmd(f"tmshutdown -i {i} -w 5")
+        time.sleep(2)
+        run_cmd(f"tmboot -i {i}")
+        time.sleep(2)
+        run_cmd(f"tmboot -i {i}")
+        log_cb(f"  ✓ Instancia {i} reiniciada")
+
+    return True
 
 
 # ── Vistas COBOL (LIBAXS) ──────────────────────────────────────────────────
@@ -2379,7 +2529,7 @@ def deploy_view_files(stdscr, views, path_hades_resolved, libpath, maquinas, had
 def run_deploy(stdscr, row, cbl_file, pre_options=None):
     """
     Pipeline completo de deploy COBOL.
-    pre_options: (carry_views, dm_name) ya calculados; si None se muestra el dialog.
+    pre_options: (carry_views, dm_name, use_hilos) ya calculados; si None se muestra el dialog.
     """
     ip         = row["ip"]
     user       = row["ssh_user"]
@@ -2508,9 +2658,9 @@ def run_deploy(stdscr, row, cbl_file, pre_options=None):
     iniciales  = row.get("iniciales", "").strip()
     dm_default = f"DM{iniciales}" if iniciales else "DM"
     if pre_options is not None:
-        carry_views, dm_name = pre_options
+        carry_views, dm_name, use_hilos = pre_options
     else:
-        carry_views, dm_name = _deploy_options_dialog(
+        carry_views, dm_name, use_hilos = _deploy_options_dialog(
             stdscr, views, dm_default, cbl_file
         )
         init_colors(); stdscr.keypad(True)
@@ -2591,42 +2741,48 @@ def run_deploy(stdscr, row, cbl_file, pre_options=None):
         if not run_step(3, cmd4, timeout=60, env=ssh_env):
             error = True
 
-    # ── Paso 5: Build en producción ───────────────────────────────────────
+    # ── Paso 5: Build / Hilos ─────────────────────────────────────────────
     if not error:
         steps[4][0] = "run"
-        # Leer build.server para encontrar el todoXX
-        read_cmd = ssh_cmd_base(ip, user, port) + [f'cat "{path_prod}/build.server" 2>/dev/null']
-        r_bs = subprocess.run(read_cmd, capture_output=True, text=True, timeout=15, env=ssh_env)
-        build_content = r_bs.stdout
-
-        target = find_build_target(build_content, int_file) if build_content else None
-
-        if not target:
-            output_lines.append(f"! No se encontró target para {int_file} en build.server")
-            steps[4][0] = "err"
-            error = True
-        else:
-            steps[4][1] = f"5/5  Build en producción:  . ./env.pro && make -f build.server {target}"
+        if use_hilos:
+            steps[4][1] = f"5/5  Deploy por Hilos:  {service} (mantiene disponibilidad)"
             redraw(4)
-            output_lines.append(f"$ target encontrado: {target}")
-
-            build_cmd_remote = f'cd "{path_prod}" && . ./env.pro && make -f build.server {target}'
-            cmd5 = ssh_cmd_base(ip, user, port) + [build_cmd_remote]
-
-            output_lines.append(f"$ {build_cmd_remote}")
-            proc5 = subprocess.Popen(cmd5, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                     bufsize=1, text=True, env=ssh_env)
-            for line in proc5.stdout:
-                output_lines.append(line.rstrip())
-                redraw(4)
-            proc5.wait(timeout=180)
-
-            if proc5.returncode == 0:
-                steps[4][0] = "ok"
-            else:
-                steps[4][0] = "err"
+            ok_h = _deploy_hilos_streaming(
+                stdscr, ip, user, password, port, path_prod,
+                service, ssh_env, output_lines,
+                lambda: redraw(4),
+            )
+            steps[4][0] = "ok" if ok_h else "err"
+            if not ok_h:
                 error = True
             redraw(4)
+        else:
+            read_cmd = ssh_cmd_base(ip, user, port) + [f'cat "{path_prod}/build.server" 2>/dev/null']
+            r_bs = subprocess.run(read_cmd, capture_output=True, text=True, timeout=15, env=ssh_env)
+            build_content = r_bs.stdout
+            target = find_build_target(build_content, int_file) if build_content else None
+
+            if not target:
+                output_lines.append(f"! No se encontró target para {int_file} en build.server")
+                steps[4][0] = "err"
+                error = True
+            else:
+                steps[4][1] = f"5/5  Build en producción:  . ./env.pro && make -f build.server {target}"
+                redraw(4)
+                output_lines.append(f"$ target encontrado: {target}")
+                build_cmd_remote = f'cd "{path_prod}" && . ./env.pro && make -f build.server {target}'
+                cmd5 = ssh_cmd_base(ip, user, port) + [build_cmd_remote]
+                output_lines.append(f"$ {build_cmd_remote}")
+                proc5 = subprocess.Popen(cmd5, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                         bufsize=1, text=True, env=ssh_env)
+                for line in proc5.stdout:
+                    output_lines.append(line.rstrip())
+                    redraw(4)
+                proc5.wait(timeout=180)
+                steps[4][0] = "ok" if proc5.returncode == 0 else "err"
+                if proc5.returncode != 0:
+                    error = True
+                redraw(4)
 
     # Limpiar temporal
     try:
@@ -2762,7 +2918,7 @@ def multiline_input(stdscr, title, hint=""):
             lines[cur_row] += chr(key)
 
 
-def _deploy_one_silent(row, cbl_file, build_content, log_cb):
+def _deploy_one_silent(row, cbl_file, build_content, log_cb, use_hilos=False):
     """
     Ejecuta el pipeline de deploy para un solo .cbl sin UI curses.
     Llama log_cb(msg) para reportar progreso.
@@ -2828,13 +2984,19 @@ def _deploy_one_silent(row, cbl_file, build_content, log_cb):
     if not ok:
         return fail("Error subiendo .int", out)
 
-    # 5. Build
-    target = find_build_target(build_content, int_file)
-    if not target:
-        return False, f"No se encontró target en build.server para {int_file}"
-    log_cb(f"  [5/5] make {target}")
-    build_cmd = f'cd "{path_prod}" && . ./env.pro && make -f build.server {target}'
-    ok, out = run(ssh_cmd_base(ip, user, port) + [build_cmd], timeout=180, env=ssh_env)
+    # 5. Build / Hilos
+    if use_hilos:
+        log_cb(f"  [5/5] hilos {service}")
+        ok = _deploy_hilos_silent(ip, user, password, port, path_prod,
+                                   service, ssh_env, log_cb)
+        out = "" if ok else f"Hilos: no se encontró servidor para {service}"
+    else:
+        target = find_build_target(build_content, int_file)
+        if not target:
+            return False, f"No se encontró target en build.server para {int_file}"
+        log_cb(f"  [5/5] make {target}")
+        build_cmd = f'cd "{path_prod}" && . ./env.pro && make -f build.server {target}'
+        ok, out = run(ssh_cmd_base(ip, user, port) + [build_cmd], timeout=180, env=ssh_env)
 
     try:
         os.remove(local_tmp)
@@ -2842,11 +3004,13 @@ def _deploy_one_silent(row, cbl_file, build_content, log_cb):
         pass
 
     if not ok:
-        return fail(f"Error en make {target}", out)
-    return True, f"OK → {target}"
+        label = "hilos" if use_hilos else f"make {target}"
+        return fail(f"Error en {label}", out)
+    label = "hilos" if use_hilos else f"make {target}"
+    return True, f"OK → {label}"
 
 
-def run_multi_deploy(stdscr, row, cbl_files):
+def run_multi_deploy(stdscr, row, cbl_files, use_hilos=False):
     """
     Despliega múltiples .cbl de forma secuencial con vista de progreso.
     """
@@ -2972,7 +3136,7 @@ def run_multi_deploy(stdscr, row, cbl_files):
             log_lines.append(msg)
             redraw(i)
 
-        ok, detail = _deploy_one_silent(row, cbl_file, build_content, log_cb)
+        ok, detail = _deploy_one_silent(row, cbl_file, build_content, log_cb, use_hilos=use_hilos)
         states[i]  = "ok" if ok else "err"
         details[i] = detail
         log_lines.append(f"{'✓' if ok else '✗'} {cbl_file}: {detail}")
@@ -5096,7 +5260,7 @@ def cobol_main(stdscr, usuario):
                             _views_d = detect_copy_views(_gr_d.stdout, _ph_d)
                         except Exception:
                             _views_d = []
-                    _carry_d, _dm_d = _deploy_options_dialog(stdscr, _views_d, _dm_def_d, cbl)
+                    _carry_d, _dm_d, _hilos_d = _deploy_options_dialog(stdscr, _views_d, _dm_def_d, cbl)
                     init_colors(); stdscr.keypad(True)
 
                     when = deploy_when_picker(stdscr, f"DEPLOY — {row['desc_cliente']} — {cbl}")
@@ -5110,19 +5274,23 @@ def cobol_main(stdscr, usuario):
                                 deploy_view_files(stdscr, _carry_d, _ph_d, _libpath_d,
                                                   _sel_maqs_d, _henv_d)
                             init_colors(); stdscr.keypad(True)
-                        run_deploy(stdscr, row, cbl, pre_options=([], _dm_d))
+                        run_deploy(stdscr, row, cbl, pre_options=([], _dm_d, _hilos_d))
                     elif when == "schedule":
                         fh = ask_datetime(stdscr)
                         if fh:
                             svcs_d = [cbl]
                             if _dm_d:
                                 svcs_d.append(f"__dm__:{_dm_d}")
+                            if _hilos_d:
+                                svcs_d.append("__hilos__")
                             db_insert_deploy_programado(
                                 usuario, row["nro_cliente"], row["desc_cliente"],
                                 svcs_d, fh,
                             )
                             notify_scheduler()
                             sufijo_d = f" + DM:{_dm_d}" if _dm_d else ""
+                            if _hilos_d:
+                                sufijo_d += " +hilos"
                             status = f"✓ Deploy de {cbl}{sufijo_d} programado para {fh.strftime('%d/%m/%Y %H:%M')}"
                 init_colors(); stdscr.keypad(True); stdscr.timeout(100)
                 needs_reload = True
@@ -5155,7 +5323,7 @@ def cobol_main(stdscr, usuario):
                             _views = detect_copy_views(_gr.stdout, _ph)
                         except Exception:
                             _views = []
-                    _carry_views, _dm_name = _deploy_options_dialog(
+                    _carry_views, _dm_name, _hilos_m = _deploy_options_dialog(
                         stdscr, _views, _dm_def, f"{len(cbl_list)} archivos",
                     )
                     init_colors(); stdscr.keypad(True)
@@ -5171,7 +5339,7 @@ def cobol_main(stdscr, usuario):
                                 deploy_view_files(stdscr, _carry_views, _ph, _libpath,
                                                   _sel_maqs, _henv)
                             init_colors(); stdscr.keypad(True)
-                        run_multi_deploy(stdscr, row, cbl_list)
+                        run_multi_deploy(stdscr, row, cbl_list, use_hilos=_hilos_m)
                         if _dm_name and row.get("path"):
                             _ssh_env = _sshenv(row.get("ssh_password", ""))
                             _run_dm_load(stdscr, row["ip"], row["ssh_user"],
@@ -5182,12 +5350,16 @@ def cobol_main(stdscr, usuario):
                         fh = ask_datetime(stdscr)
                         if fh:
                             svcs_m = cbl_list + ([f"__dm__:{_dm_name}"] if _dm_name else [])
+                            if _hilos_m:
+                                svcs_m.append("__hilos__")
                             db_insert_deploy_programado(
                                 usuario, row["nro_cliente"], row["desc_cliente"],
                                 svcs_m, fh,
                             )
                             notify_scheduler()
                             sufijo_m = f" + DM:{_dm_name}" if _dm_name else ""
+                            if _hilos_m:
+                                sufijo_m += " +hilos"
                             status = f"✓ {len(cbl_list)} servicio(s){sufijo_m} programados para {fh.strftime('%d/%m/%Y %H:%M')}"
                 init_colors(); stdscr.keypad(True); stdscr.timeout(100)
                 needs_reload = True
