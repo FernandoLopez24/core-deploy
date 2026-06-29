@@ -1111,9 +1111,10 @@ def _run_scheduled_reinicio(deploy):
     password = deploy["ssh_password"]
     port     = deploy["ssh_port"]
     path     = deploy["path"] or ""
-    STALL    = 30
+    STALL_SHUTDOWN = 45    # tmshutdown puede tardar si hay servicios lentos
+    STALL_BOOT     = 120  # tmboot con muchos servicios puede tardar más de 30s
 
-    def run_cmd(cmd_str):
+    def run_cmd(cmd_str, stall=45):
         ssh = ssh_cmd_base(ip, user, port)
         ssh.insert(3, "-tt")
         ssh.append(f'cd "{path}" && . ./env.pro && {cmd_str}')
@@ -1135,7 +1136,7 @@ def _run_scheduled_reinicio(deploy):
                     last_out = time.time()
             except (BlockingIOError, TypeError):
                 pass
-            if time.time() - last_out > STALL:
+            if time.time() - last_out > stall:
                 force_used = True
                 try:
                     proc.stdin.write(b'\x03'); proc.stdin.flush()
@@ -1162,27 +1163,28 @@ def _run_scheduled_reinicio(deploy):
     dm_name  = next((s.split(":", 1)[1] for s in svcs if s.startswith("__dm__:")),  None)
 
     logs = []
-    force, out = run_cmd("tmshutdown -y")
-    logs.append(f"tmshutdown:\n{out.strip()}")
+    force, out = run_cmd("tmshutdown -y", stall=STALL_SHUTDOWN)
+    logs.append(f"▶ tmshutdown\n{out.strip()}")
     shutdown_failed = (
         "Shutdown failed" in out
         or "Cannot shutdown BBL" in out
     )
     if force or shutdown_failed:
-        _, out2 = run_cmd("tmipcrm -y")
-        logs.append(f"tmipcrm:\n{out2.strip()}")
+        _, out2 = run_cmd("tmipcrm -y", stall=STALL_SHUTDOWN)
+        logs.append(f"▶ tmipcrm\n{out2.strip()}")
     if ubb_name:
-        _, out_ubb = run_cmd(f"tmloadcf -y {ubb_name}")
-        logs.append(f"tmloadcf ({ubb_name}):\n{out_ubb.strip()}")
+        _, out_ubb = run_cmd(f"tmloadcf -y {ubb_name}", stall=STALL_SHUTDOWN)
+        logs.append(f"▶ tmloadcf ({ubb_name})\n{out_ubb.strip()}")
     if dm_name:
-        _, out_dm = run_cmd(f"dmloadcf -y {dm_name}")
-        logs.append(f"dmloadcf ({dm_name}):\n{out_dm.strip()}")
-    _, out3 = run_cmd("tmboot -y")
-    logs.append(f"tmboot:\n{out3.strip()}")
+        _, out_dm = run_cmd(f"dmloadcf -y {dm_name}", stall=STALL_SHUTDOWN)
+        logs.append(f"▶ dmloadcf ({dm_name})\n{out_dm.strip()}")
+    _, out3 = run_cmd("tmboot -y", stall=STALL_BOOT)
+    logs.append(f"▶ tmboot\n{out3.strip()}")
 
     needs_ipc = force or shutdown_failed
-    estado = "ok"
-    detalle = "\n\n".join(logs)
+    estado    = "ok"
+    sep       = "\n" + "─" * 50 + "\n"
+    detalle   = sep.join(logs) + f"\n{'═'*50}\n✓ Reinicio completado\n"
     db_update_deploy_estado(deploy["id"], estado, detalle)
 
     cfg = load_user_config() or {}
@@ -1322,7 +1324,7 @@ def _run_scheduled_deploy(deploy):
             ip       = str(row["ip"]).split("/")[0].strip()
             ssh_env  = _sshenv(row["ssh_password"])
             path     = row["path"]
-            STALL    = 30
+            STALL    = 120  # tmboot puede tener muchos servicios
 
             def _run_cmd_silent(cmd_str):
                 ssh = ssh_cmd_base(ip, row["ssh_user"], row["ssh_port"])
@@ -1373,7 +1375,8 @@ def _run_scheduled_deploy(deploy):
 
     errores  = sum(1 for r in resultados if r.startswith("✗"))
     estado   = "error" if errores else "ok"
-    detalle  = "\n".join(resultados)
+    icono_f  = "✓" if estado == "ok" else "✗"
+    detalle  = "\n".join(resultados) + f"\n{'═'*50}\n{icono_f} Deploy {'completado' if estado == 'ok' else 'con errores'}\n"
     db_update_deploy_estado(deploy["id"], estado, detalle)
 
     cfg = load_user_config() or {}
@@ -3341,14 +3344,18 @@ def _show_programado_detalle(stdscr, dep):
         visible = lines[offset: offset + log_h]
         for i, ln in enumerate(visible):
             attr = curses.color_pair(C_NORMAL)
-            if ln.startswith("✓") or "completado" in ln.lower():
-                attr = curses.color_pair(C_OK)
+            if ln.startswith("═") or (ln.startswith("✓") and "completado" in ln.lower()):
+                attr = curses.color_pair(C_OK) | curses.A_BOLD
             elif ln.startswith("✗") or "error" in ln.lower():
-                attr = curses.color_pair(C_ERROR)
+                attr = curses.color_pair(C_ERROR) | curses.A_BOLD
+            elif ln.startswith("✓"):
+                attr = curses.color_pair(C_OK)
             elif ln.startswith("  [!]") or "forzad" in ln.lower():
                 attr = curses.color_pair(C_WARN)
             elif ln.startswith("▶") or ln.startswith("  $"):
                 attr = curses.color_pair(C_TITLE)
+            elif ln.startswith("─"):
+                attr = curses.color_pair(C_DIM)
             try:
                 stdscr.addstr(2 + i, 0, ln[:w-1], attr)
             except curses.error:
