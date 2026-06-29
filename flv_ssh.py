@@ -1486,12 +1486,25 @@ def hades_cmd_base():
         return ["ssh", "-i", HADES["key"]] + common + [target]
 
 
+_HADES_BASE = {
+    "luisl":    "intraplatinum",
+    "israelcr": "intraplatinum",
+    "juanc":    "intraplatinum",
+    "marioy":   "intraplatinum",
+    "paolac":   "intraplatinum",
+    "antonioa": "platinum",
+    "carlosv":  "platinum",
+    "danielao": "platinum",
+    "victorv":  "platinum",
+}
+
 def _resolve_hades_path(path):
-    """Sustituye /home/<cualquier-usuario>/ por /home/<usuario-hades-actual>/.
-    Así cada usuario compila desde su propio directorio en hades."""
+    """Sustituye /home/<usuario>/<base>/ según el usuario hades actual."""
     if not path:
         return path
-    return re.sub(r'^/home/[^/]+/', f'/home/{HADES["user"]}/', path)
+    user = HADES["user"]
+    base = _HADES_BASE.get(user, "intraplatinum")
+    return re.sub(r'^/home/[^/]+/[^/]+/', f'/home/{user}/{base}/', path)
 
 
 def ssh_connect(ip, user, password, port=22, remote_path=None):
