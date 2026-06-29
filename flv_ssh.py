@@ -5030,6 +5030,9 @@ def cobol_main(stdscr, usuario):
                 continue
 
             if mode == "programados":
+                if rows:
+                    _show_programado_detalle(stdscr, rows[selected])
+                    init_colors(); stdscr.keypad(True); stdscr.timeout(100)
                 continue
 
             row      = rows[selected]
@@ -5181,11 +5184,6 @@ def cobol_main(stdscr, usuario):
                             status = f"✓ {len(cbl_list)} servicio(s){sufijo_m} programados para {fh.strftime('%d/%m/%Y %H:%M')}"
                 init_colors(); stdscr.keypad(True); stdscr.timeout(100)
                 needs_reload = True
-
-            elif mode == "programados":
-                if row:
-                    _show_programado_detalle(stdscr, row)
-                    init_colors(); stdscr.keypad(True); stdscr.timeout(100)
 
             elif mode == "reinicio":
                 if not row.get("path"):
