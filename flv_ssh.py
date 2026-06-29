@@ -2622,11 +2622,15 @@ def run_deploy(stdscr, row, cbl_file, pre_options=None):
     hades_env   = _sshenv(HADES.get("password", ""))
     path_hades  = _resolve_hades_path(path_hades)
 
-    # ── Detectar vistas COPY LIBAXS ───────────────────────────────────────
     libpath = row.get("libpath", "").strip()
-    views   = []
-    if libpath:
-        # Mostrar estado brevemente
+
+    # ── Opciones de deploy (dialog o pre_options ya calculados) ───────────
+    iniciales  = row.get("iniciales", "").strip()
+    dm_default = f"DM{iniciales}" if iniciales else "DM"
+    if pre_options is not None:
+        carry_views, dm_name, use_hilos = pre_options
+    else:
+        # Detectar vistas y mostrar dialog
         h2, w2 = stdscr.getmaxyx()
         stdscr.attron(curses.color_pair(C_STATUS))
         try:
@@ -2636,9 +2640,7 @@ def run_deploy(stdscr, row, cbl_file, pre_options=None):
             pass
         stdscr.attroff(curses.color_pair(C_STATUS))
         stdscr.refresh()
-
         try:
-            # Buscar LIBAXS en el archivo (cualquier línea que lo mencione)
             clean_path = path_hades.rstrip("/")
             grep_r = subprocess.run(
                 hades_cmd_base() + [
@@ -2647,30 +2649,25 @@ def run_deploy(stdscr, row, cbl_file, pre_options=None):
                 capture_output=True, text=True, timeout=15, env=hades_env,
             )
             views = detect_copy_views(grep_r.stdout, clean_path)
-        except Exception as _ve:
+        except Exception:
             views = []
-
-    # ── Pantalla única: opciones de deploy ────────────────────────────────
-    iniciales  = row.get("iniciales", "").strip()
-    dm_default = f"DM{iniciales}" if iniciales else "DM"
-    if pre_options is not None:
-        carry_views, dm_name, use_hilos = pre_options
-    else:
         carry_views, dm_name, use_hilos = _deploy_options_dialog(
             stdscr, views, dm_default, cbl_file
         )
         init_colors(); stdscr.keypad(True)
 
-    if carry_views and libpath:
-        all_maquinas = fetch_maquinas(sistema="cobol")
-        selected_maqs = multiselect_maquinas_dialog(
-            stdscr, all_maquinas,
-            title=f"Servidores destino para vistas",
-        )
-        init_colors(); stdscr.keypad(True)
-        if selected_maqs:
-            deploy_view_files(stdscr, carry_views, path_hades, libpath,
-                              selected_maqs, hades_env)
+    if carry_views:
+        if not libpath:
+            _show_message(stdscr,
+                "Sin libpath configurado — no se pueden copiar vistas", error=True)
+        else:
+            all_maquinas = fetch_maquinas(sistema="cobol")
+            selected_maqs = multiselect_maquinas_dialog(
+                stdscr, all_maquinas, title="Servidores destino para vistas")
+            init_colors(); stdscr.keypad(True)
+            if selected_maqs:
+                deploy_view_files(stdscr, carry_views, path_hades, libpath,
+                                  selected_maqs, hades_env)
         init_colors(); stdscr.keypad(True)
 
     def run_step(idx, cmd, timeout=120, env=None):
@@ -2696,10 +2693,24 @@ def run_deploy(stdscr, row, cbl_file, pre_options=None):
     redraw()
     error = False
 
-    # ── Paso 1: Compilar en hades ──────────────────────────────────────────
+    # ── Paso 1: Compilar en hades (streaming para ver output de cob) ───────
+    steps[0][0] = "run"
+    redraw(0)
     cmd1 = hades_cmd_base() + [f'cd "{path_hades}" && cob {cbl_file}']
-    if not run_step(0, cmd1, timeout=120, env=hades_env):
+    output_lines.append(f"$ cob {cbl_file}")
+    proc1 = subprocess.Popen(cmd1, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                             bufsize=1, text=True, env=hades_env)
+    for line in proc1.stdout:
+        output_lines.append(line.rstrip())
+        redraw(0)
+    proc1.wait(timeout=120)
+    if proc1.returncode == 0:
+        steps[0][0] = "ok"
+        output_lines.append(f"✓ {cbl_file} → {int_file}")
+    else:
+        steps[0][0] = "err"
         error = True
+    redraw(0)
 
     # ── Paso 2: Descargar .int de hades ───────────────────────────────────
     if not error:
