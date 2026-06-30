@@ -1939,6 +1939,7 @@ def _parse_makefile(content):
     Parsea un Makefile uniendo continuaciones (\) y retorna:
     {target: {'deps': [...], 'cmds': [...]}}
     Preserva el case original de targets y comandos.
+    Acepta indentación con tab o con espacios.
     """
     result  = {}
     cur     = None
@@ -1951,20 +1952,20 @@ def _parse_makefile(content):
                 pending = None
             cur = m.group(1)
             result[cur] = {'deps': m.group(2).split(), 'cmds': []}
-        elif cur and line.startswith('\t'):
-            body = line[1:]
+        elif cur and line[0:1] in ('\t', ' ') and line.strip():
+            body = line.strip()
             if pending is not None:
-                if body.rstrip().endswith('\\'):
-                    pending += ' ' + body.rstrip()[:-1].strip()
+                if body.endswith('\\'):
+                    pending += ' ' + body[:-1].strip()
                 else:
-                    pending += ' ' + body.strip()
+                    pending += ' ' + body
                     result[cur]['cmds'].append(re.sub(r'\s+', ' ', pending).strip())
                     pending = None
             else:
-                if body.rstrip().endswith('\\'):
-                    pending = body.rstrip()[:-1].strip()
+                if body.endswith('\\'):
+                    pending = body[:-1].strip()
                 else:
-                    result[cur]['cmds'].append(body.strip())
+                    result[cur]['cmds'].append(body)
         else:
             if pending is not None and cur:
                 result[cur]['cmds'].append(re.sub(r'\s+', ' ', pending).strip())
