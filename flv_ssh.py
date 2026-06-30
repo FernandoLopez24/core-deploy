@@ -1939,32 +1939,66 @@ def find_build_target(build_server_content, int_file):
     Parsea build.server (Makefile) y devuelve el todoXX/TODOXX exacto
     que contiene el .int — respeta mayúsculas/minúsculas tal como
     está escrito en el archivo.
+    Soporta dos formatos:
+      - buildserver en target compilaXX referenciado por todoXX
+      - referencia directa al service en el target
     """
-    import re
-    lines = build_server_content.splitlines()
+    lines   = build_server_content.splitlines()
+    service = int_file.rsplit(".", 1)[0].lower()
 
-    # 1. Encontrar en qué bloque compilaXX/COMPILAXX está el .int
-    current_compila = None
-    target_num = None
+    # Construir mapa target → líneas de comandos (tabuladas)
+    targets = {}
+    cur = None
     for line in lines:
-        m = re.match(r'^(comp(?:ila?)?\d+)\s*:', line, re.IGNORECASE)
+        m = re.match(r'^(\w+)\s*:', line)
         if m:
-            current_compila = m.group(1)
-        if current_compila and int_file in line:
-            num = re.search(r'(\d+)$', current_compila)
-            if num:
-                target_num = num.group(1)
-                break
+            cur = m.group(1)
+            targets[cur] = []
+        elif cur and line.startswith('\t'):
+            targets[cur].append(line.strip())
 
-    if not target_num:
+    # Sub-targets que mencionan el .int o el service en sus comandos
+    matching_subs = {
+        name for name, cmds in targets.items()
+        if any(
+            int_file.lower() in c.lower() or
+            re.search(rf'\b{re.escape(service)}\b', c, re.IGNORECASE)
+            for c in cmds
+        )
+    }
+
+    # Si el service está directamente en la línea de definición del target
+    for line in lines:
+        m = re.match(r'^(\w+)\s*:(.*)', line)
+        if m and re.search(rf'\b{re.escape(service)}\b', m.group(2), re.IGNORECASE):
+            matching_subs.add(m.group(1))
+
+    if not matching_subs:
         return None
 
-    # 2. Buscar el target todoXX/TODOXX exacto con ese número en el archivo
+    # Buscar el TODO que depende de alguno de esos sub-targets
     for line in lines:
-        m = re.match(r'^(todo' + target_num + r')\s*:', line, re.IGNORECASE)
+        m = re.match(r'^((?:todo|comp(?:ila)?)\d*)\s*:(.*)', line, re.IGNORECASE)
         if m:
-            return m.group(1)   # devuelve el nombre exacto: todo15 o TODO15
+            deps = m.group(2).split()
+            if any(dep in matching_subs for dep in deps):
+                return m.group(1)
+            # O si el service aparece directamente en la línea del todo
+            if re.search(rf'\b{re.escape(service)}\b', m.group(2), re.IGNORECASE):
+                return m.group(1)
 
+    return None
+
+
+def find_buildserver_cmd(build_server_content, int_file):
+    """
+    Extrae el comando buildserver -C -v -f service.int ... del build.server.
+    Retorna el comando (str) o None.
+    """
+    for line in build_server_content.splitlines():
+        stripped = line.strip()
+        if stripped.lower().startswith("buildserver") and int_file.lower() in stripped.lower():
+            return stripped
     return None
 
 
@@ -2234,9 +2268,10 @@ def _get_hilos_ids(ip, user, password, port, path_prod, service_name, ssh_env):
 
 
 def _deploy_hilos_streaming(stdscr, ip, user, password, port, path_prod,
-                             service_name, ssh_env, lines, draw_cb):
+                             service_name, ssh_env, lines, draw_cb,
+                             buildserver_cmd=None):
     """
-    Reinicia instancia por instancia el servidor que corre service_name.
+    buildserver (una vez) + reinicio instancia por instancia.
     lines: deque compartido con run_deploy para streaming.
     draw_cb: función de redibujado.
     """
@@ -2254,7 +2289,7 @@ def _deploy_hilos_streaming(stdscr, ip, user, password, port, path_prod,
     lines.append(f"  Servidor: {servidor}  —  {len(ids)} instancia(s): {ids}")
     draw_cb()
 
-    def run_cmd(cmd_str):
+    def run_cmd(cmd_str, timeout=60):
         ssh = ssh_cmd_base(ip, user, port)
         ssh.insert(3, "-tt")
         ssh.append(f'cd "{path_prod}" && . ./env.pro && {cmd_str}')
@@ -2264,7 +2299,8 @@ def _deploy_hilos_streaming(stdscr, ip, user, password, port, path_prod,
         fl = fcntl.fcntl(proc.stdout.fileno(), fcntl.F_GETFL)
         fcntl.fcntl(proc.stdout.fileno(), fcntl.F_SETFL, fl | os.O_NONBLOCK)
         out = []
-        while proc.poll() is None:
+        deadline = time.time() + timeout
+        while proc.poll() is None and time.time() < deadline:
             try:
                 raw = proc.stdout.read(4096)
                 if raw:
@@ -2286,7 +2322,23 @@ def _deploy_hilos_streaming(stdscr, ip, user, password, port, path_prod,
             pass
         try: proc.kill()
         except Exception: pass
-        return "\n".join(out)
+        return proc.returncode, "\n".join(out)
+
+    # buildserver (una vez, antes de reiniciar instancias)
+    if buildserver_cmd:
+        lines.append(f"  ── buildserver ──")
+        lines.append(f"  $ {buildserver_cmd}")
+        draw_cb()
+        rc, _ = run_cmd(buildserver_cmd, timeout=120)
+        if rc != 0:
+            lines.append(f"  ✗ buildserver falló (rc={rc})")
+            draw_cb()
+            return False
+        lines.append(f"  ✓ buildserver OK")
+        draw_cb()
+    else:
+        lines.append(f"  ! No se encontró buildserver en build.server")
+        draw_cb()
 
     for i in ids:
         lines.append(f"  ── Instancia {i} ──")
@@ -2303,7 +2355,7 @@ def _deploy_hilos_streaming(stdscr, ip, user, password, port, path_prod,
 
 
 def _deploy_hilos_silent(ip, user, password, port, path_prod,
-                          service_name, ssh_env, log_cb):
+                          service_name, ssh_env, log_cb, buildserver_cmd=None):
     """Versión headless de deploy por hilos para deploys programados."""
     servidor, ids = _get_hilos_ids(ip, user, password, port, path_prod,
                                     service_name, ssh_env)
@@ -2313,16 +2365,26 @@ def _deploy_hilos_silent(ip, user, password, port, path_prod,
 
     log_cb(f"  Hilos: {servidor}  {ids}")
 
-    def run_cmd(cmd_str):
+    def run_cmd(cmd_str, timeout=60):
         ssh = ssh_cmd_base(ip, user, port)
         ssh.insert(3, "-tt")
         ssh.append(f'cd "{path_prod}" && . ./env.pro && {cmd_str}')
         try:
             r = subprocess.run(ssh, capture_output=True, text=True,
-                               timeout=60, env=ssh_env)
-            return r.stdout + r.stderr
+                               timeout=timeout, env=ssh_env)
+            return r.returncode, r.stdout + r.stderr
         except Exception as e:
-            return str(e)
+            return -1, str(e)
+
+    if buildserver_cmd:
+        log_cb(f"  $ {buildserver_cmd}")
+        rc, out = run_cmd(buildserver_cmd, timeout=120)
+        if rc != 0:
+            log_cb(f"  ✗ buildserver falló: {out.strip()[:120]}")
+            return False
+        log_cb(f"  ✓ buildserver OK")
+    else:
+        log_cb(f"  ! No se encontró buildserver en build.server")
 
     for i in ids:
         run_cmd(f"tmshutdown -i {i} -w 5")
@@ -2751,22 +2813,25 @@ def run_deploy(stdscr, row, cbl_file, pre_options=None):
     # ── Paso 5: Build / Hilos ─────────────────────────────────────────────
     if not error:
         steps[4][0] = "run"
+        read_cmd = ssh_cmd_base(ip, user, port) + [f'cat "{path_prod}/build.server" 2>/dev/null']
+        r_bs = subprocess.run(read_cmd, capture_output=True, text=True, timeout=15, env=ssh_env)
+        build_content = r_bs.stdout
+
         if use_hilos:
+            bs_cmd = find_buildserver_cmd(build_content, int_file) if build_content else None
             steps[4][1] = f"5/5  Deploy por Hilos:  {service} (mantiene disponibilidad)"
             redraw(4)
             ok_h = _deploy_hilos_streaming(
                 stdscr, ip, user, password, port, path_prod,
                 service, ssh_env, output_lines,
                 lambda: redraw(4),
+                buildserver_cmd=bs_cmd,
             )
             steps[4][0] = "ok" if ok_h else "err"
             if not ok_h:
                 error = True
             redraw(4)
         else:
-            read_cmd = ssh_cmd_base(ip, user, port) + [f'cat "{path_prod}/build.server" 2>/dev/null']
-            r_bs = subprocess.run(read_cmd, capture_output=True, text=True, timeout=15, env=ssh_env)
-            build_content = r_bs.stdout
             target = find_build_target(build_content, int_file) if build_content else None
 
             if not target:
@@ -2993,10 +3058,11 @@ def _deploy_one_silent(row, cbl_file, build_content, log_cb, use_hilos=False):
 
     # 5. Build / Hilos
     if use_hilos:
+        bs_cmd = find_buildserver_cmd(build_content, int_file)
         log_cb(f"  [5/5] hilos {service}")
         ok = _deploy_hilos_silent(ip, user, password, port, path_prod,
-                                   service, ssh_env, log_cb)
-        out = "" if ok else f"Hilos: no se encontró servidor para {service}"
+                                   service, ssh_env, log_cb, buildserver_cmd=bs_cmd)
+        out = "" if ok else f"Hilos: error"
     else:
         target = find_build_target(build_content, int_file)
         if not target:
