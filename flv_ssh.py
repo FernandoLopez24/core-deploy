@@ -1999,9 +1999,9 @@ def find_build_target(build_server_content, int_file):
     if not matching_subs:
         return None
 
-    # TODOXX que depende de esos sub-targets (case-insensitive en el nombre del target)
+    # TODOXX que depende de esos sub-targets (con número obligatorio: todo06, TODO06, etc.)
     for tgt, info in parsed.items():
-        if re.match(r'^(?:todo|comp(?:ila)?)\d*$', tgt, re.IGNORECASE):
+        if re.match(r'^(?:todo|comp(?:ila)?)\d+$', tgt, re.IGNORECASE):
             if any(dep in matching_subs for dep in info['deps']):
                 return tgt
             if any(re.search(rf'\b{re.escape(service)}\b', dep, re.IGNORECASE)
