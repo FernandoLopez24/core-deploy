@@ -1934,71 +1934,92 @@ def multicbl_picker(stdscr, row):
             search += chr(key); cursor = 0; offset = 0
 
 
+def _parse_makefile(content):
+    """
+    Parsea un Makefile uniendo continuaciones (\) y retorna:
+    {target: {'deps': [...], 'cmds': [...]}}
+    Preserva el case original de targets y comandos.
+    """
+    result  = {}
+    cur     = None
+    pending = None
+    for line in content.splitlines():
+        m = re.match(r'^(\w[\w.-]*)\s*:(.*)', line)
+        if m and not line[0:1].isspace():
+            if pending is not None and cur:
+                result[cur]['cmds'].append(re.sub(r'\s+', ' ', pending).strip())
+                pending = None
+            cur = m.group(1)
+            result[cur] = {'deps': m.group(2).split(), 'cmds': []}
+        elif cur and line.startswith('\t'):
+            body = line[1:]
+            if pending is not None:
+                if body.rstrip().endswith('\\'):
+                    pending += ' ' + body.rstrip()[:-1].strip()
+                else:
+                    pending += ' ' + body.strip()
+                    result[cur]['cmds'].append(re.sub(r'\s+', ' ', pending).strip())
+                    pending = None
+            else:
+                if body.rstrip().endswith('\\'):
+                    pending = body.rstrip()[:-1].strip()
+                else:
+                    result[cur]['cmds'].append(body.strip())
+        else:
+            if pending is not None and cur:
+                result[cur]['cmds'].append(re.sub(r'\s+', ' ', pending).strip())
+                pending = None
+    if pending is not None and cur:
+        result[cur]['cmds'].append(re.sub(r'\s+', ' ', pending).strip())
+    return result
+
+
 def find_build_target(build_server_content, int_file):
     """
-    Parsea build.server (Makefile) y devuelve el todoXX/TODOXX exacto
-    que contiene el .int — respeta mayúsculas/minúsculas tal como
-    está escrito en el archivo.
-    Soporta dos formatos:
-      - buildserver en target compilaXX referenciado por todoXX
-      - referencia directa al service en el target
+    Devuelve el todoXX exacto (preservando case del archivo) que contiene el .int.
+    Soporta buildserver con múltiples -f y targets TODO/todo/TODO en cualquier case.
     """
-    lines   = build_server_content.splitlines()
     service = int_file.rsplit(".", 1)[0].lower()
+    parsed  = _parse_makefile(build_server_content)
 
-    # Construir mapa target → líneas de comandos (tabuladas)
-    targets = {}
-    cur = None
-    for line in lines:
-        m = re.match(r'^(\w+)\s*:', line)
-        if m:
-            cur = m.group(1)
-            targets[cur] = []
-        elif cur and line.startswith('\t'):
-            targets[cur].append(line.strip())
-
-    # Sub-targets que mencionan el .int o el service en sus comandos
-    matching_subs = {
-        name for name, cmds in targets.items()
-        if any(
-            int_file.lower() in c.lower() or
-            re.search(rf'\b{re.escape(service)}\b', c, re.IGNORECASE)
-            for c in cmds
-        )
-    }
-
-    # Si el service está directamente en la línea de definición del target
-    for line in lines:
-        m = re.match(r'^(\w+)\s*:(.*)', line)
-        if m and re.search(rf'\b{re.escape(service)}\b', m.group(2), re.IGNORECASE):
-            matching_subs.add(m.group(1))
+    # Sub-targets cuyos comandos o deps mencionan el .int o el service
+    matching_subs = set()
+    for tgt, info in parsed.items():
+        for cmd in info['cmds']:
+            if int_file.lower() in cmd.lower() or \
+               re.search(rf'\b{re.escape(service)}\b', cmd, re.IGNORECASE):
+                matching_subs.add(tgt)
+                break
+        for dep in info['deps']:
+            if re.search(rf'\b{re.escape(service)}\b', dep, re.IGNORECASE):
+                matching_subs.add(tgt)
+                break
 
     if not matching_subs:
         return None
 
-    # Buscar el TODO que depende de alguno de esos sub-targets
-    for line in lines:
-        m = re.match(r'^((?:todo|comp(?:ila)?)\d*)\s*:(.*)', line, re.IGNORECASE)
-        if m:
-            deps = m.group(2).split()
-            if any(dep in matching_subs for dep in deps):
-                return m.group(1)
-            # O si el service aparece directamente en la línea del todo
-            if re.search(rf'\b{re.escape(service)}\b', m.group(2), re.IGNORECASE):
-                return m.group(1)
+    # TODOXX que depende de esos sub-targets (case-insensitive en el nombre del target)
+    for tgt, info in parsed.items():
+        if re.match(r'^(?:todo|comp(?:ila)?)\d*$', tgt, re.IGNORECASE):
+            if any(dep in matching_subs for dep in info['deps']):
+                return tgt
+            if any(re.search(rf'\b{re.escape(service)}\b', dep, re.IGNORECASE)
+                   for dep in info['deps']):
+                return tgt
 
     return None
 
 
 def find_buildserver_cmd(build_server_content, int_file):
     """
-    Extrae el comando buildserver -C -v -f service.int ... del build.server.
-    Retorna el comando (str) o None.
+    Extrae el comando buildserver completo (uniendo continuaciones \)
+    que incluye el .int. Un buildserver puede tener múltiples -f.
     """
-    for line in build_server_content.splitlines():
-        stripped = line.strip()
-        if stripped.lower().startswith("buildserver") and int_file.lower() in stripped.lower():
-            return stripped
+    parsed = _parse_makefile(build_server_content)
+    for info in parsed.values():
+        for cmd in info['cmds']:
+            if cmd.lower().startswith('buildserver') and int_file.lower() in cmd.lower():
+                return cmd
     return None
 
 
